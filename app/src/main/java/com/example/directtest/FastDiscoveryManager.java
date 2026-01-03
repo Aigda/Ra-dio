@@ -58,6 +58,9 @@ public class FastDiscoveryManager {
     private static final long DEVICE_ONLINE_THRESHOLD = 20_000;
     private static final long CACHE_TTL = 120_000;
 
+    // [TTL] Максимальный возраст сообщения в слоте (в секундах)
+    private static final long MAX_MSG_AGE_SEC = 120;
+
     // ==================== STATE ====================
     private final Context context;
     private WifiP2pManager manager;
@@ -66,6 +69,7 @@ public class FastDiscoveryManager {
 
     private final String deviceId;
     private final String shortDeviceId;
+    private final String sessionId;   // [sessionId] уникален для каждого запуска
     private String macAddress = "02:00:00:00:00:00";
 
     private WifiP2pDnsSdServiceInfo mainServiceInfo;
@@ -148,6 +152,9 @@ public class FastDiscoveryManager {
         public long heartbeatSeq;
         public long prevHeartbeatSeq;
         public long lastHeartbeatReceived;
+
+        // [sessionId] актуальная сессия удалённого устройства
+        public String sessionId;
 
         // Sent Messages
         public static class SentMessage {
@@ -296,6 +303,7 @@ public class FastDiscoveryManager {
             heartbeatSeq = 0;
             prevHeartbeatSeq = 0;
             lastHeartbeatReceived = 0;
+            // sessionId здесь специально не трогаем
         }
     }
 
@@ -319,9 +327,11 @@ public class FastDiscoveryManager {
         this.context = context.getApplicationContext();
         this.deviceId = generateDeviceId();
         this.shortDeviceId = deviceId.substring(0, 8);
+        this.sessionId = UUID.randomUUID().toString().substring(0, 8); // [sessionId]
 
         log.divider("FastDiscoveryManager INIT");
         log.i("Device ID: " + shortDeviceId);
+        log.i("Session ID: " + sessionId); // [sessionId]
         log.i("Android: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
         log.i("Model: " + Build.MODEL);
     }
@@ -498,6 +508,7 @@ public class FastDiscoveryManager {
 
     public String getDeviceId() { return deviceId; }
     public String getShortDeviceId() { return shortDeviceId; }
+    public String getSessionId() { return sessionId; }      // [sessionId]
     public String getMacAddress() { return macAddress; }
     public boolean isRunning() { return isRunning; }
     public int getDeviceCount() { return deviceCache.size(); }
@@ -523,6 +534,7 @@ public class FastDiscoveryManager {
         StringBuilder sb = new StringBuilder();
         sb.append("═══ DEVICE INFO ═══\n");
         sb.append("My ID: ").append(shortDeviceId).append("\n");
+        sb.append("Session: ").append(sessionId).append("\n"); // [sessionId]
         sb.append("MAC: ").append(macAddress).append("\n");
         sb.append("Heartbeat: ").append(heartbeatSeq.get()).append("\n");
         sb.append("TXT received: ").append(txtRecordsReceived.get()).append("\n");
@@ -531,6 +543,7 @@ public class FastDiscoveryManager {
         sb.append("\n═══ DEVICES ═══\n");
         for (DiscoveredDevice dd : deviceCache.values()) {
             sb.append("• ").append(dd.name).append(" [").append(dd.getShortId()).append("]\n");
+            sb.append("  Session: ").append(dd.sessionId).append("\n");
             sb.append("  Visible msgs: ").append(dd.currentVisibleMsgIds).append("\n");
             sb.append("  Pending ACKs: ").append(dd.getPendingAckMessageIds()).append("\n");
         }
@@ -664,6 +677,8 @@ public class FastDiscoveryManager {
         record.put("hb", String.valueOf(heartbeatSeq.get()));
         record.put("v", "3");
 
+        record.put("sid", sessionId); // [sessionId]
+
         String acks = buildAckString();
         if (!acks.isEmpty()) {
             record.put("ack", acks);
@@ -753,6 +768,7 @@ public class FastDiscoveryManager {
         Map<String, String> record = new HashMap<>();
         record.put("id", shortDeviceId);
         record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
+        record.put("sid", sessionId); // [sessionId]
 
         StringBuilder ackSb = new StringBuilder();
         int count = 0;
@@ -851,6 +867,8 @@ public class FastDiscoveryManager {
         record.put("msg", truncateMessage(message, 100));
         record.put("s", String.valueOf(slotIndex));
         record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
+
+        record.put("sid", sessionId); // [sessionId]
 
         if (targetDeviceId != null) {
             record.put("to", targetDeviceId.length() > 8 ? targetDeviceId.substring(0, 8) : targetDeviceId);
@@ -975,6 +993,12 @@ public class FastDiscoveryManager {
             try { dd.updateHeartbeat(Long.parseLong(hbStr)); } catch (NumberFormatException e) {}
         }
 
+        // [sessionId] сохраняем sid удалённого устройства
+        String sid = record.get("sid");
+        if (sid != null && !sid.isEmpty()) {
+            dd.sessionId = sid;
+        }
+
         notifyDeviceUpdated(dd);
     }
 
@@ -984,6 +1008,8 @@ public class FastDiscoveryManager {
         String message = record.get("msg");
         String targetId = record.get("to");
         String slotStr = record.get("s");
+        String sid = record.get("sid");   // [sessionId]
+        String tStr = record.get("t");    // [TTL]
 
         if (senderId == null || msgId == null) return;
         if (targetId != null && !targetId.equals(shortDeviceId)) return;
@@ -996,6 +1022,46 @@ public class FastDiscoveryManager {
 
         if (slotStr != null) {
             try { dd.lastSlotIndex = Integer.parseInt(slotStr); } catch (NumberFormatException e) {}
+        }
+
+        // [TTL] Фильтрация по возрасту сообщения
+        if (tStr != null) {
+            try {
+                long msgTsSec = Long.parseLong(tStr);
+                long nowSec = System.currentTimeMillis() / 1000;
+                long ageSec = nowSec - msgTsSec;
+                if (ageSec > MAX_MSG_AGE_SEC) {
+                    log.w("Ignoring old message slot " + msgId +
+                            " from " + senderId + " age=" + ageSec + "s");
+                    return;
+                }
+            } catch (NumberFormatException e) {
+                // игнорируем ошибку парсинга, принимаем как есть
+            }
+        }
+
+        // [sessionId] Фильтрация по sid (с учётом первого контакта)
+        if (sid != null) {
+            if (dd.sessionId == null) {
+                // первое сообщение/контакт — запоминаем sid
+                dd.sessionId = sid;
+            } else if (!sid.equals(dd.sessionId)) {
+                // сообщение из другой (старой) сессии этого же устройства – игнорируем
+                log.w("Ignoring stale message slot " + msgId +
+                        " from " + senderId + " sid=" + sid +
+                        " != currentSid=" + dd.sessionId);
+                return;
+            }
+        } else {
+            // sid отсутствует в сообщении
+            if (dd.sessionId != null) {
+                // мы уже знаем sid устройства → считаем это устаревшим протоколом/мусором
+                log.w("Ignoring message slot " + msgId +
+                        " from " + senderId + " without sid; deviceSid=" + dd.sessionId);
+                return;
+            }
+            // dd.sessionId == null и sid == null → старый протокол / первый контакт
+            // Принимаем, чтобы не терять сообщения в одноверсионной среде
         }
 
         // Обновляем список видимых сообщений
@@ -1026,15 +1092,34 @@ public class FastDiscoveryManager {
     private void handleAckServiceRecord(Map<String, String> record, WifiP2pDevice device) {
         String senderId = record.get("id");
         String acks = record.get("ack");
+        String sid = record.get("sid"); // [sessionId]
 
         if (senderId == null || shortDeviceId.equals(senderId)) return;
-
-        log.success("ACK SERVICE received from " + senderId + ": " + acks);
 
         DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
         dd.deviceId = senderId;
         dd.hasOurApp = true;
         dd.lastSeen = System.currentTimeMillis();
+
+        // [sessionId] Фильтрация ACK по sid
+        if (sid != null) {
+            if (dd.sessionId == null) {
+                dd.sessionId = sid;
+            } else if (!sid.equals(dd.sessionId)) {
+                log.w("Ignoring ACK service from " + senderId +
+                        " sid=" + sid + " != currentSid=" + dd.sessionId);
+                return;
+            }
+        } else {
+            if (dd.sessionId != null) {
+                log.w("Ignoring ACK service from " + senderId +
+                        " without sid; deviceSid=" + dd.sessionId);
+                return;
+            }
+            // dd.sessionId == null и sid == null → принимаем для совместимости
+        }
+
+        log.success("ACK SERVICE received from " + senderId + ": " + acks);
 
         if (acks != null && !acks.isEmpty()) {
             processReceivedAcks(acks, dd);
