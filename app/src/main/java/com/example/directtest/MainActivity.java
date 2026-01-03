@@ -5,12 +5,15 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
+import com.example.directtest.R;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -34,6 +37,20 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvStatus;
     private Button btnSendBroadcast;
     private Button btnRefresh;
+    private Button btnLog;
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable uiUpdateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (adapter != null) {
+                adapter.updateManagerInfo(discoveryManager);
+                adapter.notifyDataSetChanged();
+            }
+            updateStatusBar();
+            uiHandler.postDelayed(this, 1000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,40 +60,71 @@ public class MainActivity extends AppCompatActivity {
         tvStatus = findViewById(R.id.tv_status);
         btnSendBroadcast = findViewById(R.id.btn_broadcast);
         btnRefresh = findViewById(R.id.btn_refresh);
+        btnLog = findViewById(R.id.btn_log);
 
         RecyclerView recyclerView = findViewById(R.id.recycler_devices);
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
         adapter = new DeviceAdapter(devices, this::onDeviceClick);
         recyclerView.setAdapter(adapter);
 
-        Button btnLog = findViewById(R.id.btn_log);
-        btnLog.setOnClickListener(v -> {
-            Intent intent = new Intent(this, DiagnosticActivity.class);
-            startActivity(intent);
-        });
-
         btnSendBroadcast.setOnClickListener(v -> {
             if (discoveryManager != null) {
-                String text = "Broadcast " + System.currentTimeMillis();
+                String text = "Broadcast #" + System.currentTimeMillis() % 10000;
                 String msgId = discoveryManager.broadcastMessage(text);
                 Toast.makeText(this, "Broadcast: " + msgId, Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
             }
-
         });
 
         btnRefresh.setOnClickListener(v -> {
             if (discoveryManager != null) {
                 discoveryManager.forceRefresh();
-                Toast.makeText(this, "Принудительный поиск...", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Обновление...", Toast.LENGTH_SHORT).show();
             }
         });
 
-        // ✅ Сначала проверяем разрешения!
+        btnLog.setOnClickListener(v -> {
+            Intent intent = new Intent(this, DiagnosticActivity.class);
+            startActivity(intent);
+        });
+
         checkAndRequestPermissions();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        uiHandler.post(uiUpdateRunnable);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        uiHandler.removeCallbacks(uiUpdateRunnable);
+    }
+
+    private void updateStatusBar() {
+        if (discoveryManager == null) return;
+
+        int total = devices.size();
+        int online = 0;
+        int withApp = 0;
+
+        for (FastDiscoveryManager.DiscoveredDevice d : devices) {
+            if (d.isOnline()) online++;
+            if (d.hasOurApp) withApp++;
+        }
+
+        long hbSeq = discoveryManager.getHeartbeatSeq();
+        long hbAgo = (System.currentTimeMillis() - discoveryManager.getLastHeartbeatSentTime()) / 1000;
+
+        String status = String.format(Locale.getDefault(),
+                "Dev:%d On:%d App:%d | HB#%d (%ds) | TXT:%d SVC:%d",
+                total, online, withApp,
+                hbSeq, hbAgo,
+                discoveryManager.getTxtRecordsReceived(),
+                discoveryManager.getServiceResponsesReceived());
+
+        tvStatus.setText(status);
     }
 
     // ==================== PERMISSIONS ====================
@@ -84,13 +132,11 @@ public class MainActivity extends AppCompatActivity {
     private void checkAndRequestPermissions() {
         List<String> permissionsNeeded = new ArrayList<>();
 
-        // Location - нужен для WiFi P2P на Android 6+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             permissionsNeeded.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
 
-        // Android 13+ - NEARBY_WIFI_DEVICES
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -99,10 +145,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (permissionsNeeded.isEmpty()) {
-            // Все разрешения есть - запускаем
             startDiscovery();
         } else {
-            // Запрашиваем разрешения
             tvStatus.setText("Требуются разрешения...");
             ActivityCompat.requestPermissions(this,
                     permissionsNeeded.toArray(new String[0]),
@@ -128,9 +172,6 @@ public class MainActivity extends AppCompatActivity {
                 startDiscovery();
             } else {
                 tvStatus.setText("❌ Разрешения не выданы");
-                Toast.makeText(this,
-                        "WiFi P2P требует разрешения на местоположение",
-                        Toast.LENGTH_LONG).show();
             }
         }
     }
@@ -138,7 +179,7 @@ public class MainActivity extends AppCompatActivity {
     // ==================== DISCOVERY ====================
 
     private void startDiscovery() {
-        tvStatus.setText("Запуск WiFi P2P...");
+        tvStatus.setText("Запуск...");
 
         try {
             discoveryManager = new FastDiscoveryManager(this);
@@ -148,7 +189,6 @@ public class MainActivity extends AppCompatActivity {
                 public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
                     runOnUiThread(() -> {
                         updateOrAddDevice(device);
-                        tvStatus.setText("Найдено: " + devices.size());
                     });
                 }
 
@@ -156,7 +196,6 @@ public class MainActivity extends AppCompatActivity {
                 public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
                     runOnUiThread(() -> {
                         updateOrAddDevice(device);
-                        adapter.notifyDataSetChanged();
                     });
                 }
 
@@ -165,21 +204,17 @@ public class MainActivity extends AppCompatActivity {
                     runOnUiThread(() -> {
                         devices.remove(device);
                         adapter.notifyDataSetChanged();
-                        tvStatus.setText("Найдено: " + devices.size());
                     });
                 }
 
                 @Override
                 public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice device, boolean isOnline) {
-                    runOnUiThread(() -> {
-                        updateOrAddDevice(device);
-                        adapter.notifyDataSetChanged();
-                    });
+                    runOnUiThread(() -> adapter.notifyDataSetChanged());
                 }
 
                 @Override
                 public void onStatusChanged(String status) {
-                    runOnUiThread(() -> tvStatus.setText(status));
+                    // Статус обновляется в uiUpdateRunnable
                 }
 
                 @Override
@@ -191,37 +226,37 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onMessageSent(String messageId, String message, String targetDeviceId) {
-                    runOnUiThread(() ->
-                            Toast.makeText(MainActivity.this, "Отправлено: " + messageId, Toast.LENGTH_SHORT).show()
-                    );
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this, "→ " + messageId, Toast.LENGTH_SHORT).show();
+                        adapter.notifyDataSetChanged();
+                    });
                 }
 
                 @Override
                 public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device,
                                               String messageId, String message) {
-                    runOnUiThread(() ->
-                            Toast.makeText(MainActivity.this,
-                                    "Получено от " + device.getShortId() + ": " + message,
-                                    Toast.LENGTH_LONG).show()
-                    );
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this,
+                                "← " + device.getShortId() + ": " + message,
+                                Toast.LENGTH_LONG).show();
+                        adapter.notifyDataSetChanged();
+                    });
                 }
 
                 @Override
                 public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
-                    runOnUiThread(() ->
-                            Toast.makeText(MainActivity.this,
-                                    "Доставлено → " + ackedMessageId, Toast.LENGTH_SHORT).show()
-                    );
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this,
+                                "✓ ACK: " + ackedMessageId, Toast.LENGTH_SHORT).show();
+                        adapter.notifyDataSetChanged();
+                    });
                 }
             });
 
         } catch (Exception e) {
             tvStatus.setText("❌ Ошибка: " + e.getMessage());
-            e.printStackTrace();
         }
     }
-
-    // ==================== DEVICE MANAGEMENT ====================
 
     private void updateOrAddDevice(FastDiscoveryManager.DiscoveredDevice device) {
         int index = -1;
@@ -240,22 +275,27 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onDeviceClick(FastDiscoveryManager.DiscoveredDevice device) {
-        if (discoveryManager == null) {
-            Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
+        if (discoveryManager == null) return;
+
+        if (!device.hasOurApp) {
+            Toast.makeText(this, "Устройство без приложения", Toast.LENGTH_SHORT).show();
             return;
         }
+
         if (!device.isOnline()) {
-            Toast.makeText(this, "Устройство не в сети", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Устройство оффлайн", Toast.LENGTH_SHORT).show();
             return;
         }
-        String text = "Привет " + device.getShortId() + " " + System.currentTimeMillis();
+
+        String text = "Hello @" + System.currentTimeMillis() % 10000;
         String msgId = discoveryManager.sendMessage(text, device.deviceId);
-        Toast.makeText(this, "→ " + device.getShortId() + "\n" + msgId, Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "→ " + device.getShortId() + ": " + msgId, Toast.LENGTH_SHORT).show();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        uiHandler.removeCallbacksAndMessages(null);
         if (discoveryManager != null) {
             discoveryManager.stop();
         }
@@ -267,6 +307,8 @@ public class MainActivity extends AppCompatActivity {
 
         private final List<FastDiscoveryManager.DiscoveredDevice> list;
         private final OnDeviceClickListener listener;
+        private long myHeartbeatSeq = 0;
+        private long myLastHbSentTime = 0;
 
         interface OnDeviceClickListener {
             void onClick(FastDiscoveryManager.DiscoveredDevice device);
@@ -277,34 +319,185 @@ public class MainActivity extends AppCompatActivity {
             this.listener = l;
         }
 
+        public void updateManagerInfo(FastDiscoveryManager manager) {
+            if (manager != null) {
+                myHeartbeatSeq = manager.getHeartbeatSeq();
+                myLastHbSentTime = manager.getLastHeartbeatSentTime();
+            }
+        }
+
         @NonNull
         @Override
         public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             View v = LayoutInflater.from(parent.getContext())
-                    .inflate(android.R.layout.simple_list_item_2, parent, false);
+                    .inflate(R.layout.item_device, parent, false);
             return new ViewHolder(v);
         }
 
         @Override
-        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+        public void onBindViewHolder(@NonNull ViewHolder h, int position) {
             FastDiscoveryManager.DiscoveredDevice dev = list.get(position);
+            long now = System.currentTimeMillis();
 
-            String status = dev.isOnline() ? "● онлайн" : "○ оффлайн";
-            String line1 = dev.name != null && !dev.name.isEmpty() ? dev.name : "Без имени";
-            String line2 = String.format(Locale.getDefault(),
-                    "%s  •  %s  •  %s",
-                    dev.getShortId(),
-                    status,
-                    dev.hasOurApp ? "есть приложение" : "нет приложения"
-            );
+            // === Заголовок ===
+            String displayName = dev.name != null && !dev.name.isEmpty() ? dev.name : "Unknown";
+            h.tvDeviceName.setText(displayName);
 
-            holder.text1.setText(line1);
-            holder.text2.setText(line2);
+            if (dev.isOnline()) {
+                h.tvStatusIndicator.setText("● ONLINE");
+                h.tvStatusIndicator.setTextColor(0xFF4CAF50);
+                h.tvDeviceName.setTextColor(0xFF2E7D32);
+            } else {
+                h.tvStatusIndicator.setText("○ OFFLINE");
+                h.tvStatusIndicator.setTextColor(0xFF9E9E9E);
+                h.tvDeviceName.setTextColor(0xFF757575);
+            }
 
-            int color = dev.isOnline() ? 0xff2e7d32 : 0xff757575;
-            holder.text1.setTextColor(color);
+            // === ID и адрес ===
+            String deviceId = dev.deviceId != null ? dev.deviceId : "unknown";
+            String shortId = deviceId.length() > 8 ? deviceId.substring(0, 8) : deviceId;
+            h.tvDeviceId.setText(String.format("ID: %s | MAC: %s", shortId, dev.address));
 
-            holder.itemView.setOnClickListener(v -> listener.onClick(dev));
+            // === Статус приложения ===
+            String appStatus = dev.hasOurApp ? "✅ App" : "❌ No App";
+            long lastSeenAgo = (now - dev.lastSeen) / 1000;
+            h.tvAppStatus.setText(String.format(Locale.getDefault(),
+                    "%s | Seen: %dx | %ds ago",
+                    appStatus, dev.seenCount, lastSeenAgo));
+
+            // === Heartbeat отправленный (наш) ===
+            if (myLastHbSentTime > 0) {
+                long hbSentAgo = (now - myLastHbSentTime) / 1000;
+                h.tvHeartbeatSent.setText(String.format(Locale.getDefault(),
+                        "↑ My HB#%d sent %ds ago", myHeartbeatSeq, hbSentAgo));
+            } else {
+                h.tvHeartbeatSent.setText("↑ My HB: not sent yet");
+            }
+
+            // === Heartbeat полученный (от устройства) ===
+            if (dev.lastHeartbeatReceived > 0) {
+                long hbRecvAgo = (now - dev.lastHeartbeatReceived) / 1000;
+                h.tvHeartbeatReceived.setText(String.format(Locale.getDefault(),
+                        "↓ HB#%d ← #%d (%ds ago)",
+                        dev.heartbeatSeq, dev.prevHeartbeatSeq, hbRecvAgo));
+
+                // Цвет в зависимости от свежести
+                if (hbRecvAgo < 10) {
+                    h.tvHeartbeatReceived.setTextColor(0xFF4CAF50); // зелёный
+                } else if (hbRecvAgo < 30) {
+                    h.tvHeartbeatReceived.setTextColor(0xFFFF9800); // оранжевый
+                } else {
+                    h.tvHeartbeatReceived.setTextColor(0xFF757575); // серый
+                }
+            } else {
+                h.tvHeartbeatReceived.setText("↓ No HB received");
+                h.tvHeartbeatReceived.setTextColor(0xFF757575);
+            }
+
+            // === Отправленные сообщения ===
+            FastDiscoveryManager.DiscoveredDevice.SentMessage lastSent = dev.getLastSentMessage();
+            if (lastSent != null) {
+                long sentAgo = (now - lastSent.sentAt) / 1000;
+                String ackIcon = lastSent.acknowledged ? "✓" : "⏳";
+                String targetStr = lastSent.targetDeviceId != null ?
+                        "→" + lastSent.targetDeviceId.substring(0, Math.min(8, lastSent.targetDeviceId.length())) :
+                        "→ALL";
+
+                h.tvMessagesSent.setText(String.format(Locale.getDefault(),
+                        "%s [%s] %s \"%s\" (%ds) S:%d",
+                        ackIcon,
+                        lastSent.messageId,
+                        targetStr,
+                        truncate(lastSent.text, 15),
+                        sentAgo,
+                        lastSent.slotIndex));
+
+                // Цвет в зависимости от ACK
+                if (lastSent.acknowledged) {
+                    h.tvMessagesSent.setTextColor(0xFF4CAF50);
+                } else if (sentAgo > 10) {
+                    h.tvMessagesSent.setTextColor(0xFFFF5722); // красный - долго без ACK
+                } else {
+                    h.tvMessagesSent.setTextColor(0xFFFF9800); // оранжевый - ожидание
+                }
+
+                // Показываем количество сообщений
+                int pending = dev.getPendingMessagesCount();
+                int total = dev.sentMessages.size();
+                if (total > 1) {
+                    h.tvMessagesSent.append(String.format(" [%d/%d]", pending, total));
+                }
+            } else {
+                h.tvMessagesSent.setText("↑ No messages sent");
+                h.tvMessagesSent.setTextColor(0xFF757575);
+            }
+
+            // === Полученные сообщения ===
+            FastDiscoveryManager.DiscoveredDevice.ReceivedMessage lastRecv = dev.getLastReceivedMessage();
+            if (lastRecv != null) {
+                long recvAgo = (now - lastRecv.receivedAt) / 1000;
+                h.tvMessagesReceived.setText(String.format(Locale.getDefault(),
+                        "↓ [%s] \"%s\" (%ds ago)",
+                        lastRecv.messageId,
+                        truncate(lastRecv.text, 20),
+                        recvAgo));
+
+                int totalRecv = dev.receivedMessages.size();
+                if (totalRecv > 1) {
+                    h.tvMessagesReceived.append(String.format(" [total: %d]", totalRecv));
+                }
+                h.tvMessagesReceived.setTextColor(0xFF2196F3);
+            } else {
+                h.tvMessagesReceived.setText("↓ No messages received");
+                h.tvMessagesReceived.setTextColor(0xFF757575);
+            }
+
+            // === ACKs ===
+            if (!dev.ackedMessageIds.isEmpty()) {
+                StringBuilder ackSb = new StringBuilder();
+                int count = 0;
+                for (String ackId : dev.ackedMessageIds) {
+                    if (count > 0) ackSb.append(", ");
+                    ackSb.append(ackId);
+                    count++;
+                    if (count >= 3) {
+                        ackSb.append("...");
+                        break;
+                    }
+                }
+                long ackAgo = dev.lastAckTime > 0 ? (now - dev.lastAckTime) / 1000 : -1;
+                h.tvAcksInfo.setText(String.format(Locale.getDefault(),
+                        "✓ %d ACKs: %s (%ds)",
+                        dev.ackedMessageIds.size(),
+                        ackSb.toString(),
+                        ackAgo));
+                h.tvAcksInfo.setTextColor(0xFF4CAF50);
+            } else {
+                h.tvAcksInfo.setText("No ACKs");
+                h.tvAcksInfo.setTextColor(0xFF757575);
+            }
+
+            // === Service Info ===
+            String serviceName = dev.lastServiceName != null ? dev.lastServiceName : "-";
+            String slotInfo = dev.lastSlotIndex >= 0 ? String.valueOf(dev.lastSlotIndex) : "-";
+            h.tvServiceInfo.setText(String.format("📡 Svc: %s | Slot: %s", serviceName, slotInfo));
+
+            // Клик
+            h.itemView.setOnClickListener(v -> listener.onClick(dev));
+
+            // Фон в зависимости от статуса
+            if (dev.hasOurApp && dev.isOnline()) {
+                h.itemView.setBackgroundColor(0x0800FF00); // легкий зелёный
+            } else if (dev.hasOurApp) {
+                h.itemView.setBackgroundColor(0x08FFFF00); // легкий жёлтый
+            } else {
+                h.itemView.setBackgroundColor(0x00000000); // прозрачный
+            }
+        }
+
+        private String truncate(String s, int max) {
+            if (s == null) return "";
+            return s.length() <= max ? s : s.substring(0, max) + "…";
         }
 
         @Override
@@ -313,12 +506,25 @@ public class MainActivity extends AppCompatActivity {
         }
 
         static class ViewHolder extends RecyclerView.ViewHolder {
-            TextView text1, text2;
+            TextView tvDeviceName, tvStatusIndicator;
+            TextView tvDeviceId, tvAppStatus;
+            TextView tvHeartbeatSent, tvHeartbeatReceived;
+            TextView tvMessagesSent, tvMessagesReceived;
+            TextView tvAcksInfo;
+            TextView tvServiceInfo;
 
             ViewHolder(View itemView) {
                 super(itemView);
-                text1 = itemView.findViewById(android.R.id.text1);
-                text2 = itemView.findViewById(android.R.id.text2);
+                tvDeviceName = itemView.findViewById(R.id.tv_device_name);
+                tvStatusIndicator = itemView.findViewById(R.id.tv_status_indicator);
+                tvDeviceId = itemView.findViewById(R.id.tv_device_id);
+                tvAppStatus = itemView.findViewById(R.id.tv_app_status);
+                tvHeartbeatSent = itemView.findViewById(R.id.tv_heartbeat_sent);
+                tvHeartbeatReceived = itemView.findViewById(R.id.tv_heartbeat_received);
+                tvMessagesSent = itemView.findViewById(R.id.tv_messages_sent);
+                tvMessagesReceived = itemView.findViewById(R.id.tv_messages_received);
+                tvAcksInfo = itemView.findViewById(R.id.tv_acks_info);
+                tvServiceInfo = itemView.findViewById(R.id.tv_service_info);
             }
         }
     }
