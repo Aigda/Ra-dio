@@ -1,5 +1,9 @@
 package com.example.directtest;
 
+import android.Manifest;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -8,7 +12,10 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -17,6 +24,8 @@ import java.util.List;
 import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
+
+    private static final int PERMISSION_REQUEST_CODE = 1001;
 
     private FastDiscoveryManager discoveryManager;
     private DeviceAdapter adapter;
@@ -40,53 +49,179 @@ public class MainActivity extends AppCompatActivity {
         adapter = new DeviceAdapter(devices, this::onDeviceClick);
         recyclerView.setAdapter(adapter);
 
-        discoveryManager = new FastDiscoveryManager(this);
-
-        discoveryManager.start(new FastDiscoveryManager.DiscoveryListener() {
-            @Override public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
-                runOnUiThread(() -> { updateOrAddDevice(device); tvStatus.setText("Найдено: " + devices.size()); });
-            }
-            @Override public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
-                runOnUiThread(() -> { updateOrAddDevice(device); adapter.notifyDataSetChanged(); });
-            }
-            @Override public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
-                runOnUiThread(() -> {
-                    devices.remove(device);
-                    adapter.notifyDataSetChanged();
-                    tvStatus.setText("Найдено: " + devices.size());
-                });
-            }
-            @Override public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice device, boolean isOnline) {
-                runOnUiThread(() -> { updateOrAddDevice(device); adapter.notifyDataSetChanged(); });
-            }
-            @Override public void onStatusChanged(String status) { runOnUiThread(() -> tvStatus.setText(status)); }
-            @Override public void onError(String message) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Ошибка: " + message, Toast.LENGTH_SHORT).show());
-            }
-            @Override public void onMessageSent(String messageId, String message, String targetDeviceId) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Отправлено: " + messageId, Toast.LENGTH_SHORT).show());
-            }
-            @Override public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                        "Получено от " + device.getShortId() + ": " + message, Toast.LENGTH_LONG).show());
-            }
-            @Override public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                        "Доставлено → " + ackedMessageId, Toast.LENGTH_SHORT).show());
-            }
+        Button btnLog = findViewById(R.id.btn_log);
+        btnLog.setOnClickListener(v -> {
+            Intent intent = new Intent(this, DiagnosticActivity.class);
+            startActivity(intent);
         });
 
         btnSendBroadcast.setOnClickListener(v -> {
-            String text = "Broadcast " + System.currentTimeMillis();
-            String msgId = discoveryManager.broadcastMessage(text);
-            Toast.makeText(this, "Broadcast: " + msgId, Toast.LENGTH_SHORT).show();
+            if (discoveryManager != null) {
+                String text = "Broadcast " + System.currentTimeMillis();
+                String msgId = discoveryManager.broadcastMessage(text);
+                Toast.makeText(this, "Broadcast: " + msgId, Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
+            }
+
         });
 
         btnRefresh.setOnClickListener(v -> {
-            discoveryManager.forceRefresh();
-            Toast.makeText(this, "Принудительный поиск...", Toast.LENGTH_SHORT).show();
+            if (discoveryManager != null) {
+                discoveryManager.forceRefresh();
+                Toast.makeText(this, "Принудительный поиск...", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
+            }
         });
+
+        // ✅ Сначала проверяем разрешения!
+        checkAndRequestPermissions();
     }
+
+    // ==================== PERMISSIONS ====================
+
+    private void checkAndRequestPermissions() {
+        List<String> permissionsNeeded = new ArrayList<>();
+
+        // Location - нужен для WiFi P2P на Android 6+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            permissionsNeeded.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+
+        // Android 13+ - NEARBY_WIFI_DEVICES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES)
+                    != PackageManager.PERMISSION_GRANTED) {
+                permissionsNeeded.add(Manifest.permission.NEARBY_WIFI_DEVICES);
+            }
+        }
+
+        if (permissionsNeeded.isEmpty()) {
+            // Все разрешения есть - запускаем
+            startDiscovery();
+        } else {
+            // Запрашиваем разрешения
+            tvStatus.setText("Требуются разрешения...");
+            ActivityCompat.requestPermissions(this,
+                    permissionsNeeded.toArray(new String[0]),
+                    PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean allGranted = grantResults.length > 0;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+
+            if (allGranted) {
+                startDiscovery();
+            } else {
+                tvStatus.setText("❌ Разрешения не выданы");
+                Toast.makeText(this,
+                        "WiFi P2P требует разрешения на местоположение",
+                        Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    // ==================== DISCOVERY ====================
+
+    private void startDiscovery() {
+        tvStatus.setText("Запуск WiFi P2P...");
+
+        try {
+            discoveryManager = new FastDiscoveryManager(this);
+
+            discoveryManager.start(new FastDiscoveryManager.DiscoveryListener() {
+                @Override
+                public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
+                    runOnUiThread(() -> {
+                        updateOrAddDevice(device);
+                        tvStatus.setText("Найдено: " + devices.size());
+                    });
+                }
+
+                @Override
+                public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
+                    runOnUiThread(() -> {
+                        updateOrAddDevice(device);
+                        adapter.notifyDataSetChanged();
+                    });
+                }
+
+                @Override
+                public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
+                    runOnUiThread(() -> {
+                        devices.remove(device);
+                        adapter.notifyDataSetChanged();
+                        tvStatus.setText("Найдено: " + devices.size());
+                    });
+                }
+
+                @Override
+                public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice device, boolean isOnline) {
+                    runOnUiThread(() -> {
+                        updateOrAddDevice(device);
+                        adapter.notifyDataSetChanged();
+                    });
+                }
+
+                @Override
+                public void onStatusChanged(String status) {
+                    runOnUiThread(() -> tvStatus.setText(status));
+                }
+
+                @Override
+                public void onError(String message) {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this, "Ошибка: " + message, Toast.LENGTH_SHORT).show()
+                    );
+                }
+
+                @Override
+                public void onMessageSent(String messageId, String message, String targetDeviceId) {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this, "Отправлено: " + messageId, Toast.LENGTH_SHORT).show()
+                    );
+                }
+
+                @Override
+                public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device,
+                                              String messageId, String message) {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this,
+                                    "Получено от " + device.getShortId() + ": " + message,
+                                    Toast.LENGTH_LONG).show()
+                    );
+                }
+
+                @Override
+                public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this,
+                                    "Доставлено → " + ackedMessageId, Toast.LENGTH_SHORT).show()
+                    );
+                }
+            });
+
+        } catch (Exception e) {
+            tvStatus.setText("❌ Ошибка: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // ==================== DEVICE MANAGEMENT ====================
 
     private void updateOrAddDevice(FastDiscoveryManager.DiscoveredDevice device) {
         int index = -1;
@@ -105,6 +240,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onDeviceClick(FastDiscoveryManager.DiscoveredDevice device) {
+        if (discoveryManager == null) {
+            Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (!device.isOnline()) {
             Toast.makeText(this, "Устройство не в сети", Toast.LENGTH_SHORT).show();
             return;
@@ -117,10 +256,13 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (discoveryManager != null) discoveryManager.stop();
+        if (discoveryManager != null) {
+            discoveryManager.stop();
+        }
     }
 
-    // Адаптер
+    // ==================== ADAPTER ====================
+
     static class DeviceAdapter extends RecyclerView.Adapter<DeviceAdapter.ViewHolder> {
 
         private final List<FastDiscoveryManager.DiscoveredDevice> list;
@@ -135,15 +277,16 @@ public class MainActivity extends AppCompatActivity {
             this.listener = l;
         }
 
+        @NonNull
         @Override
-        public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             View v = LayoutInflater.from(parent.getContext())
                     .inflate(android.R.layout.simple_list_item_2, parent, false);
             return new ViewHolder(v);
         }
 
         @Override
-        public void onBindViewHolder(ViewHolder holder, int position) {
+        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
             FastDiscoveryManager.DiscoveredDevice dev = list.get(position);
 
             String status = dev.isOnline() ? "● онлайн" : "○ оффлайн";
@@ -164,10 +307,14 @@ public class MainActivity extends AppCompatActivity {
             holder.itemView.setOnClickListener(v -> listener.onClick(dev));
         }
 
-        @Override public int getItemCount() { return list.size(); }
+        @Override
+        public int getItemCount() {
+            return list.size();
+        }
 
         static class ViewHolder extends RecyclerView.ViewHolder {
             TextView text1, text2;
+
             ViewHolder(View itemView) {
                 super(itemView);
                 text1 = itemView.findViewById(android.R.id.text1);

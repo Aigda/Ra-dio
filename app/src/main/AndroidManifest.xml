@@ -36,6 +36,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".DiagnosticActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DirectTest" />
+
     </application>
 
 </manifest>
