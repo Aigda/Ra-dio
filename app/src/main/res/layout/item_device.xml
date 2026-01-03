@@ -6,6 +6,7 @@
     android:padding="12dp"
     android:background="?attr/selectableItemBackground">
 
+    <!-- Заголовок устройства -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -18,143 +19,202 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textSize="16sp"
-            android:textStyle="bold"
-            android:text="Device Name" />
+            android:textStyle="bold" />
 
         <TextView
             android:id="@+id/tv_status_indicator"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:text="● ONLINE"
-            android:textColor="#4CAF50" />
+            android:textSize="12sp" />
 
     </LinearLayout>
 
+    <!-- ID и статус -->
     <TextView
         android:id="@+id/tv_device_id"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="11sp"
+        android:textSize="10sp"
         android:textColor="#666666"
-        android:fontFamily="monospace"
-        android:text="ID: aa425396 | MAC: 00:11:22:33:44:55" />
+        android:fontFamily="monospace" />
 
     <TextView
         android:id="@+id/tv_app_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="11sp"
-        android:textColor="#666666"
-        android:text="App: Detected | Seen: 5x" />
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:background="#22000000"
-        android:layout_marginTop="8dp"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:id="@+id/tv_heartbeat_header"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="11sp"
-        android:textStyle="bold"
-        android:textColor="#2196F3"
-        android:text="HEARTBEAT" />
-
-    <TextView
-        android:id="@+id/tv_heartbeat_sent"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
         android:textSize="10sp"
-        android:fontFamily="monospace"
-        android:textColor="#444444"
-        android:text="Sent: HB#15 (3s ago)" />
+        android:textColor="#666666" />
 
-    <TextView
-        android:id="@+id/tv_heartbeat_received"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="10sp"
-        android:fontFamily="monospace"
-        android:textColor="#444444"
-        android:text="Recv: HB#12 (5s ago)" />
-
+    <!-- Heartbeat -->
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
         android:background="#22000000"
         android:layout_marginTop="6dp"
-        android:layout_marginBottom="6dp" />
+        android:layout_marginBottom="4dp" />
 
     <TextView
-        android:id="@+id/tv_messages_header"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="11sp"
-        android:textStyle="bold"
-        android:textColor="#FF9800"
-        android:text="MESSAGES" />
-
-    <TextView
-        android:id="@+id/tv_messages_sent"
+        android:id="@+id/tv_heartbeat_info"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:textSize="10sp"
         android:fontFamily="monospace"
-        android:textColor="#444444"
-        android:text="No messages sent" />
+        android:textColor="#2196F3" />
 
-    <TextView
-        android:id="@+id/tv_messages_received"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="10sp"
-        android:fontFamily="monospace"
-        android:textColor="#444444"
-        android:text="No messages received" />
-
+    <!-- ПОЛУЧЕННЫЕ СООБЩЕНИЯ (от этого устройства) -->
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
         android:background="#22000000"
         android:layout_marginTop="6dp"
-        android:layout_marginBottom="6dp" />
+        android:layout_marginBottom="4dp" />
 
     <TextView
-        android:id="@+id/tv_acks_header"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="11sp"
+        android:textSize="10sp"
         android:textStyle="bold"
         android:textColor="#4CAF50"
-        android:text="ACKNOWLEDGMENTS" />
+        android:text="📥 RECEIVED (from this device)" />
 
     <TextView
-        android:id="@+id/tv_acks_info"
+        android:id="@+id/tv_received_1"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="10sp"
+        android:textSize="9sp"
         android:fontFamily="monospace"
         android:textColor="#444444"
-        android:text="No ACKs" />
+        android:paddingStart="8dp" />
 
+    <TextView
+        android:id="@+id/tv_received_1_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#4CAF50"
+        android:paddingStart="16dp" />
+
+    <TextView
+        android:id="@+id/tv_received_2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#444444"
+        android:paddingStart="8dp" />
+
+    <TextView
+        android:id="@+id/tv_received_2_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#4CAF50"
+        android:paddingStart="16dp" />
+
+    <TextView
+        android:id="@+id/tv_received_3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#444444"
+        android:paddingStart="8dp" />
+
+    <TextView
+        android:id="@+id/tv_received_3_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#4CAF50"
+        android:paddingStart="16dp" />
+
+    <!-- ОТПРАВЛЕННЫЕ СООБЩЕНИЯ (этому устройству) -->
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
         android:background="#22000000"
         android:layout_marginTop="6dp"
-        android:layout_marginBottom="6dp" />
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="10sp"
+        android:textStyle="bold"
+        android:textColor="#FF9800"
+        android:text="📤 SENT (to this device)" />
+
+    <TextView
+        android:id="@+id/tv_sent_1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#444444"
+        android:paddingStart="8dp" />
+
+    <TextView
+        android:id="@+id/tv_sent_1_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#2196F3"
+        android:paddingStart="16dp" />
+
+    <TextView
+        android:id="@+id/tv_sent_2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#444444"
+        android:paddingStart="8dp" />
+
+    <TextView
+        android:id="@+id/tv_sent_2_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#2196F3"
+        android:paddingStart="16dp" />
+
+    <TextView
+        android:id="@+id/tv_sent_3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#444444"
+        android:paddingStart="8dp" />
+
+    <TextView
+        android:id="@+id/tv_sent_3_ack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:textColor="#2196F3"
+        android:paddingStart="16dp" />
+
+    <!-- Service Info -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#22000000"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="4dp" />
 
     <TextView
         android:id="@+id/tv_service_info"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="10sp"
+        android:textSize="9sp"
         android:fontFamily="monospace"
-        android:textColor="#9C27B0"
-        android:text="Service: WFD_Main | Slot: -" />
+        android:textColor="#9C27B0" />
 
 </LinearLayout>
