@@ -528,14 +528,15 @@ public class FastDiscoveryManager {
         schedulePeriodicTasks();
         notifyStatus("Cleared. Devices: " + deviceCache.size());
     }
-
     public String sendMessage(String message, String targetDeviceId) {
         if (!isRunning) return null;
 
         int freeSlot = findFreeSlot();
         if (freeSlot < 0) freeSlot = releaseOldestSlot();
 
-        String msgId = shortDeviceId + "_" + messageIdCounter.incrementAndGet();
+        // ИЗМЕНЕНО: включаем sessionId в msgId для уникальности между сессиями
+        String msgId = shortDeviceId + "_" + sessionId + "_" + messageIdCounter.incrementAndGet();
+
         PendingMessage pending = new PendingMessage(msgId, message, targetDeviceId, freeSlot);
         pendingMessages.put(msgId, pending);
 
@@ -570,7 +571,6 @@ public class FastDiscoveryManager {
         }
         return msgId;
     }
-
     public void forceRefresh() {
         if (!isRunning) return;
         log.divider("FORCE REFRESH");
@@ -986,15 +986,30 @@ public class FastDiscoveryManager {
         DeviceState state = stateRepository.get(senderId);
         if (state != null && sid != null) {
             if (state.lastSessionId != null && !sid.equals(state.lastSessionId)) {
-                log.w("SYNC from old session, ignoring");
-                return;
+                // Сессия изменилась - очищаем историю
+                log.w("SYNC from new session, clearing history for " + senderId);
+                state.clearMessages();
+                state.lastSessionId = sid;
+                stateRepository.save();
             }
         }
 
         List<String> theirSentIds = SyncManager.parseIdList(theirSent);
         List<String> theirRecvIds = SyncManager.parseIdList(theirRecv);
 
-        syncManager.processIncomingSync(senderId, theirSentIds, theirRecvIds);
+        // ДОБАВЛЕНО: Фильтруем theirRecvIds - оставляем только сообщения с нашим sessionId
+        List<String> filteredTheirRecvIds = new ArrayList<>();
+        for (String recvId : theirRecvIds) {
+            // Проверяем что это наше сообщение из текущей сессии
+            if (recvId.startsWith(shortDeviceId + "_" + sessionId + "_")) {
+                filteredTheirRecvIds.add(recvId);
+            } else if (recvId.startsWith(shortDeviceId + "_")) {
+                // Старый формат или другая сессия - логируем и пропускаем
+                log.d("Ignoring old/foreign message in SYNC recv: " + recvId);
+            }
+        }
+
+        syncManager.processIncomingSync(senderId, theirSentIds, filteredTheirRecvIds);
     }
 
     private void resendMessage(String targetDeviceId, String msgId, String text) {
@@ -1240,7 +1255,6 @@ public class FastDiscoveryManager {
         recentTxtRecords.put(dedupeKey, now);
         return false;
     }
-
     private void handleMainServiceRecord(Map<String, String> record, WifiP2pDevice device, String serviceName) {
         String senderId = record.get("id");
         if (senderId == null) return;
@@ -1263,6 +1277,21 @@ public class FastDiscoveryManager {
 
         String sid = record.get("sid");
         if (sid != null && !sid.isEmpty()) {
+            // ДОБАВЛЕНО: Проверяем смену сессии
+            if (dd.sessionId != null && !sid.equals(dd.sessionId)) {
+                log.w("Session changed for " + senderId + ": " + dd.sessionId + " -> " + sid);
+                // Очищаем историю сообщений - это НОВАЯ сессия устройства
+                dd.clearHistory();
+
+                // Также очищаем в репозитории
+                DeviceState state = stateRepository.get(senderId);
+                if (state != null) {
+                    state.clearMessages();
+                    state.lastSessionId = sid;
+                    stateRepository.save();
+                    log.i("Cleared message history for " + senderId + " due to session change");
+                }
+            }
             dd.sessionId = sid;
         }
 
@@ -1271,6 +1300,11 @@ public class FastDiscoveryManager {
         state.name = dd.name;
         state.address = dd.address;
         if (sid != null) {
+            // Проверяем смену сессии в репозитории тоже
+            if (state.lastSessionId != null && !sid.equals(state.lastSessionId)) {
+                log.w("Repo session changed for " + senderId + ": " + state.lastSessionId + " -> " + sid);
+                state.clearMessages();
+            }
             state.lastSessionId = sid;
         }
 
@@ -1334,6 +1368,27 @@ public class FastDiscoveryManager {
                 log.w("Ignoring message slot " + msgId +
                         " from " + senderId + " without sid; deviceSid=" + dd.sessionId);
                 return;
+            }
+        }
+
+        // ДОБАВЛЕНО: Дополнительная проверка - msgId должен содержать текущий sid отправителя
+        // Формат: senderId_senderSessionId_counter
+        // Это защита от старых сообщений с тем же counter но другой сессией
+        if (sid != null && !msgId.contains("_" + sid + "_")) {
+            // Проверяем старый формат (deviceId_counter)
+            String[] parts = msgId.split("_");
+            if (parts.length == 2) {
+                // Старый формат - проверяем по sid из record
+                // Если sid в record совпадает с dd.sessionId - принимаем
+                // Если нет - это старое сообщение
+                log.d("Old format msgId: " + msgId + " from session " + sid);
+            } else if (parts.length >= 3) {
+                // Новый формат deviceId_sessionId_counter
+                String msgSessionId = parts[1];
+                if (!msgSessionId.equals(sid)) {
+                    log.w("Ignoring message with mismatched session in msgId: " + msgId);
+                    return;
+                }
             }
         }
 
@@ -1416,17 +1471,18 @@ public class FastDiscoveryManager {
         }
 
         for (String ack : ackBatch) {
-            if (ack.startsWith(shortDeviceId + "_")) {
+            // ИЗМЕНЕНО: проверяем что ACK для нашего устройства И нашей сессии
+            // Формат msgId теперь: deviceId_sessionId_counter
+            if (ack.startsWith(shortDeviceId + "_" + sessionId + "_")) {
 
                 // ДЕДУПЛИКАЦИЯ: проверяем не обработан ли уже этот ACK
                 if (processedAcks.contains(ack)) {
-                    continue;  // Уже обработано
+                    continue;
                 }
 
                 // Проверяем есть ли pending message
                 PendingMessage pm = pendingMessages.get(ack);
                 if (pm == null) {
-                    // Уже обработано ранее (слот освобождён)
                     continue;
                 }
 
@@ -1446,7 +1502,7 @@ public class FastDiscoveryManager {
                     DeviceState state = stateRepository.get(sender.deviceId);
                     if (state != null) {
                         state.markAcked(ack);
-                        stateRepository.save();  // Теперь с debounce
+                        stateRepository.save();
                     }
                 }
 
@@ -1458,6 +1514,8 @@ public class FastDiscoveryManager {
                     handler.post(() -> listener.onAckReceived(sender, finalAck));
                 }
             }
+            // Для совместимости: старый формат deviceId_counter (без sessionId)
+            // Игнорируем - это старые сообщения
         }
     }
 
