@@ -15,6 +15,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
+import com.example.directtest.sync.DeviceState;
+import com.example.directtest.sync.DeviceStateRepository;
+import com.example.directtest.sync.SyncManager;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -37,7 +41,8 @@ public class FastDiscoveryManager {
     public static final String SERVICE_TYPE = "_wfd._tcp";
     private static final String MAIN_SERVICE_NAME = "WFD_Main";
     private static final String MSG_SLOT_PREFIX = "WFD_Msg";
-    private static final String ACK_SERVICE_NAME = "WFD_Ack";  // ← НОВЫЙ ACK сервис
+    private static final String ACK_SERVICE_NAME = "WFD_Ack";
+    private static final String SYNC_SERVICE_NAME = "WFD_Sync";  // SYNC сервис
     private static final int MAX_MSG_SLOTS = 3;
     private static final String APP_MARKER = "[WFD]";
 
@@ -52,14 +57,17 @@ public class FastDiscoveryManager {
     private static final long FAST_MODE_DURATION = 30_000;
 
     private static final long HEARTBEAT_INTERVAL = 5_000;
-    private static final long ACK_SERVICE_LIFETIME = 15_000;  // ACK сервис живёт 15 сек
-    private static final long ACK_UPDATE_INTERVAL = 2_000;    // Обновлять ACK каждые 2 сек
+    private static final long ACK_SERVICE_LIFETIME = 15_000;
+    private static final long ACK_UPDATE_INTERVAL = 2_000;
     private static final long SLOT_TIMEOUT = 30_000;
     private static final long DEVICE_ONLINE_THRESHOLD = 20_000;
     private static final long CACHE_TTL = 120_000;
 
-    // [TTL] Максимальный возраст сообщения в слоте (в секундах)
     private static final long MAX_MSG_AGE_SEC = 120;
+
+    // SYNC timing
+    private static final long SYNC_CHECK_INTERVAL = 10_000;   // Проверка каждые 10 сек
+    private static final long SYNC_SERVICE_LIFETIME = 30_000; // SYNC сервис живёт 30 сек
 
     // ==================== STATE ====================
     private final Context context;
@@ -69,11 +77,12 @@ public class FastDiscoveryManager {
 
     private final String deviceId;
     private final String shortDeviceId;
-    private final String sessionId;   // [sessionId] уникален для каждого запуска
+    private final String sessionId;
     private String macAddress = "02:00:00:00:00:00";
 
     private WifiP2pDnsSdServiceInfo mainServiceInfo;
-    private WifiP2pDnsSdServiceInfo ackServiceInfo;  // ← НОВЫЙ ACK сервис
+    private WifiP2pDnsSdServiceInfo ackServiceInfo;
+    private WifiP2pDnsSdServiceInfo syncServiceInfo;  // SYNC сервис
     private final Map<Integer, SlotInfo> messageSlots = new ConcurrentHashMap<>();
     private final List<WifiP2pServiceRequest> serviceRequests = new ArrayList<>();
 
@@ -87,6 +96,10 @@ public class FastDiscoveryManager {
     private final Map<String, Long> activeIncomingMessages = new ConcurrentHashMap<>();
     private final Set<String> pendingAcksToSend = Collections.synchronizedSet(new LinkedHashSet<>());
 
+    // SYNC system
+    private DeviceStateRepository stateRepository;
+    private SyncManager syncManager;
+
     private final AtomicLong heartbeatSeq = new AtomicLong(0);
     private final AtomicInteger messageIdCounter = new AtomicInteger(0);
     private final AtomicInteger txtRecordsReceived = new AtomicInteger(0);
@@ -99,6 +112,15 @@ public class FastDiscoveryManager {
     private long lastNewDeviceTime = 0;
     private long currentInterval = NORMAL_INTERVAL;
     private long lastHeartbeatSentTime = 0;
+
+    // Дедупликация TXT записей
+    private final Map<String, Long> recentTxtRecords = new ConcurrentHashMap<>();
+    private static final long TXT_DEDUP_WINDOW_MS = 2000;  // Игнорировать дубликаты в течение 2 сек
+    private static final int MAX_RECENT_TXT_RECORDS = 50;
+
+    // Трекинг обработанных ACK (чтобы не обрабатывать повторно)
+    private final Set<String> processedAcks = Collections.synchronizedSet(new LinkedHashSet<>());
+    private static final int MAX_PROCESSED_ACKS = 50;
 
     private DiscoveryListener listener;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -153,8 +175,11 @@ public class FastDiscoveryManager {
         public long prevHeartbeatSeq;
         public long lastHeartbeatReceived;
 
-        // [sessionId] актуальная сессия удалённого устройства
+        // Session ID
         public String sessionId;
+
+        // Online tracking for sync
+        private boolean wasOnlineLastCheck;
 
         // Sent Messages
         public static class SentMessage {
@@ -200,6 +225,13 @@ public class FastDiscoveryManager {
 
         public boolean isOnline() {
             return System.currentTimeMillis() - lastSeen < DEVICE_ONLINE_THRESHOLD;
+        }
+
+        public boolean checkAndUpdateOnlineTransition() {
+            boolean currentlyOnline = isOnline();
+            boolean justCameOnline = !wasOnlineLastCheck && currentlyOnline;
+            wasOnlineLastCheck = currentlyOnline;
+            return justCameOnline;
         }
 
         public String getShortId() {
@@ -303,7 +335,6 @@ public class FastDiscoveryManager {
             heartbeatSeq = 0;
             prevHeartbeatSeq = 0;
             lastHeartbeatReceived = 0;
-            // sessionId здесь специально не трогаем
         }
     }
 
@@ -327,11 +358,34 @@ public class FastDiscoveryManager {
         this.context = context.getApplicationContext();
         this.deviceId = generateDeviceId();
         this.shortDeviceId = deviceId.substring(0, 8);
-        this.sessionId = UUID.randomUUID().toString().substring(0, 8); // [sessionId]
+        this.sessionId = UUID.randomUUID().toString().substring(0, 8);
+
+        // Инициализация SYNC системы
+        stateRepository = new DeviceStateRepository(context);
+        stateRepository.initialize(deviceId, sessionId);
+
+        syncManager = new SyncManager(stateRepository);
+        syncManager.setCallback(new SyncManager.SyncCallback() {
+            @Override
+            public void onPublishSync(String targetDeviceId, List<String> mySentIds, List<String> myRecvIds) {
+                registerSyncService(targetDeviceId, mySentIds, myRecvIds);
+            }
+
+            @Override
+            public void onResendMessage(String targetDeviceId, String msgId, String text) {
+                resendMessage(targetDeviceId, msgId, text);
+            }
+
+            @Override
+            public void onSyncComplete(String deviceId) {
+                log.success("SYNC complete with " + deviceId);
+            }
+        });
 
         log.divider("FastDiscoveryManager INIT");
         log.i("Device ID: " + shortDeviceId);
-        log.i("Session ID: " + sessionId); // [sessionId]
+        log.i("Session ID: " + sessionId);
+        log.i("Loaded " + stateRepository.getAll().size() + " saved devices");
         log.i("Android: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
         log.i("Model: " + Build.MODEL);
     }
@@ -381,11 +435,16 @@ public class FastDiscoveryManager {
 
         notifyStatus("Starting...");
     }
-
     public void stop() {
         log.divider("STOP");
         isRunning = false;
         handler.removeCallbacksAndMessages(null);
+
+        // Принудительное сохранение состояния
+        if (stateRepository != null) {
+            stateRepository.saveNow();  // Немедленное сохранение
+            log.i("State saved");
+        }
 
         if (receiver != null) {
             try { context.unregisterReceiver(receiver); } catch (Exception e) {}
@@ -406,20 +465,16 @@ public class FastDiscoveryManager {
         activeIncomingMessages.clear();
         pendingAcksToSend.clear();
         processedMessageIds.clear();
+        recentTxtRecords.clear();  // Очищаем кэш дедупликации
+        processedAcks.clear();     // Очищаем обработанные ACK
 
         notifyStatus("Stopped");
     }
-
-    /**
-     * Полная очистка состояния (как будто приложение только запустили)
-     */
     public void clearAll() {
         log.divider("CLEAR ALL");
 
-        // Останавливаем всё
         handler.removeCallbacksAndMessages(null);
 
-        // Очищаем слоты сообщений
         for (SlotInfo slot : messageSlots.values()) {
             if (slot.serviceInfo != null && slot.isRegistered) {
                 manager.removeLocalService(channel, slot.serviceInfo, null);
@@ -427,39 +482,50 @@ public class FastDiscoveryManager {
         }
         messageSlots.clear();
 
-        // Очищаем ACK сервис
         if (ackServiceInfo != null) {
             manager.removeLocalService(channel, ackServiceInfo, null);
             ackServiceInfo = null;
         }
 
-        // Очищаем все очереди
+        if (syncServiceInfo != null) {
+            manager.removeLocalService(channel, syncServiceInfo, null);
+            syncServiceInfo = null;
+        }
+
         pendingMessages.clear();
         activeIncomingMessages.clear();
         pendingAcksToSend.clear();
         processedMessageIds.clear();
+        recentTxtRecords.clear();  // Очищаем кэш дедупликации
+        processedAcks.clear();     // Очищаем обработанные ACK
 
-        // Очищаем историю в устройствах (но не удаляем сами устройства)
         for (DiscoveredDevice dd : deviceCache.values()) {
             dd.clearHistory();
         }
 
-        // Сбрасываем счётчики
         messageIdCounter.set(0);
         txtRecordsReceived.set(0);
         serviceResponsesReceived.set(0);
         heartbeatSeq.set(0);
 
-        // Очищаем логи
+        // Очищаем состояния в репозитории
+        if (stateRepository != null) {
+            for (DeviceState state : stateRepository.getAll().values()) {
+                state.clearMessages();
+            }
+            stateRepository.saveNow();  // Немедленное сохранение
+        }
+
+        if (syncManager != null) {
+            syncManager.clearAllPending();
+        }
+
         DiagnosticLogger.getInstance().clear();
 
         log.success("All cleared");
         log.divider("FRESH START");
 
-        // Перезапускаем периодические задачи
         schedulePeriodicTasks();
-
-        // Обновляем UI
         notifyStatus("Cleared. Devices: " + deviceCache.size());
     }
 
@@ -473,7 +539,15 @@ public class FastDiscoveryManager {
         PendingMessage pending = new PendingMessage(msgId, message, targetDeviceId, freeSlot);
         pendingMessages.put(msgId, pending);
 
-        // Записываем в историю устройства
+        // Сохранение в репозиторий для SYNC
+        if (targetDeviceId != null) {
+            DeviceState state = stateRepository.getOrCreate(targetDeviceId);
+            state.addSentMessage(msgId, message);
+            stateRepository.save();
+            log.d("Saved to state repository: " + msgId + " -> " + targetDeviceId);
+        }
+
+        // Записываем в историю устройства (для UI)
         for (DiscoveredDevice dd : deviceCache.values()) {
             if (targetDeviceId != null) {
                 if (targetDeviceId.equals(dd.deviceId) ||
@@ -508,7 +582,7 @@ public class FastDiscoveryManager {
 
     public String getDeviceId() { return deviceId; }
     public String getShortDeviceId() { return shortDeviceId; }
-    public String getSessionId() { return sessionId; }      // [sessionId]
+    public String getSessionId() { return sessionId; }
     public String getMacAddress() { return macAddress; }
     public boolean isRunning() { return isRunning; }
     public int getDeviceCount() { return deviceCache.size(); }
@@ -530,22 +604,34 @@ public class FastDiscoveryManager {
         return new ArrayList<>(deviceCache.values());
     }
 
+    public DeviceStateRepository getStateRepository() {
+        return stateRepository;
+    }
+
     public String getDiagnosticInfo() {
         StringBuilder sb = new StringBuilder();
         sb.append("═══ DEVICE INFO ═══\n");
         sb.append("My ID: ").append(shortDeviceId).append("\n");
-        sb.append("Session: ").append(sessionId).append("\n"); // [sessionId]
+        sb.append("Session: ").append(sessionId).append("\n");
         sb.append("MAC: ").append(macAddress).append("\n");
         sb.append("Heartbeat: ").append(heartbeatSeq.get()).append("\n");
         sb.append("TXT received: ").append(txtRecordsReceived.get()).append("\n");
         sb.append("Pending ACKs: ").append(pendingAcksToSend.size()).append("\n");
         sb.append("Active incoming: ").append(activeIncomingMessages.size()).append("\n");
+        sb.append("Saved devices: ").append(stateRepository.getAll().size()).append("\n");
         sb.append("\n═══ DEVICES ═══\n");
         for (DiscoveredDevice dd : deviceCache.values()) {
             sb.append("• ").append(dd.name).append(" [").append(dd.getShortId()).append("]\n");
             sb.append("  Session: ").append(dd.sessionId).append("\n");
             sb.append("  Visible msgs: ").append(dd.currentVisibleMsgIds).append("\n");
             sb.append("  Pending ACKs: ").append(dd.getPendingAckMessageIds()).append("\n");
+
+            // Добавляем инфо из репозитория
+            DeviceState state = stateRepository.get(dd.deviceId);
+            if (state != null) {
+                sb.append("  [Repo] Sent: ").append(state.getSentMessageIds()).append("\n");
+                sb.append("  [Repo] Recv: ").append(state.getRecvMessageIds()).append("\n");
+            }
         }
         return sb.toString();
     }
@@ -594,11 +680,13 @@ public class FastDiscoveryManager {
 
     private void clearRequestsAndSetup() {
         manager.clearServiceRequests(channel, new WifiP2pManager.ActionListener() {
-            @Override public void onSuccess() {
+            @Override
+            public void onSuccess() {
                 serviceRequests.clear();
                 setupDiscovery();
             }
-            @Override public void onFailure(int r) {
+            @Override
+            public void onFailure(int r) {
                 serviceRequests.clear();
                 setupDiscovery();
             }
@@ -675,9 +763,9 @@ public class FastDiscoveryManager {
         record.put("id", shortDeviceId);
         record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
         record.put("hb", String.valueOf(heartbeatSeq.get()));
-        record.put("v", "3");
+        record.put("v", "4");  // Версия протокола
 
-        record.put("sid", sessionId); // [sessionId]
+        record.put("sid", sessionId);
 
         String acks = buildAckString();
         if (!acks.isEmpty()) {
@@ -691,7 +779,6 @@ public class FastDiscoveryManager {
         StringBuilder sb = new StringBuilder();
         int count = 0;
 
-        // Собираем ACK для сообщений, которые ещё видны в слотах отправителей
         for (DiscoveredDevice dd : deviceCache.values()) {
             List<String> deviceAcks = dd.getPendingAckMessageIds();
             for (String msgId : deviceAcks) {
@@ -748,14 +835,12 @@ public class FastDiscoveryManager {
     private void updateAckService() {
         if (!isRunning) return;
 
-        // Собираем все pending ACK
         Set<String> allAcks = new HashSet<>();
         for (DiscoveredDevice dd : deviceCache.values()) {
             allAcks.addAll(dd.getPendingAckMessageIds());
         }
 
         if (allAcks.isEmpty()) {
-            // Удаляем ACK сервис если нет pending ACK
             if (ackServiceInfo != null) {
                 manager.removeLocalService(channel, ackServiceInfo, null);
                 ackServiceInfo = null;
@@ -764,11 +849,10 @@ public class FastDiscoveryManager {
             return;
         }
 
-        // Создаём/обновляем ACK сервис
         Map<String, String> record = new HashMap<>();
         record.put("id", shortDeviceId);
         record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
-        record.put("sid", sessionId); // [sessionId]
+        record.put("sid", sessionId);
 
         StringBuilder ackSb = new StringBuilder();
         int count = 0;
@@ -816,13 +900,109 @@ public class FastDiscoveryManager {
                 }
             });
         }
+    }
 
-        // Также добавляем ACK в message slots для дополнительной надёжности
-        for (SlotInfo slot : messageSlots.values()) {
-            if (slot.isRegistered) {
-                // Слот уже зарегистрирован, не трогаем
+    // ==================== SYNC SERVICE ====================
+
+    private void registerSyncService(String targetDeviceId, List<String> mySentIds, List<String> myRecvIds) {
+        String shortTargetId = targetDeviceId.length() > 8
+                ? targetDeviceId.substring(0, 8)
+                : targetDeviceId;
+
+        Map<String, String> record = new HashMap<>();
+        record.put("id", shortDeviceId);
+        record.put("to", shortTargetId);
+        record.put("sent", SyncManager.formatIdList(mySentIds));  // что я отправлял им
+        record.put("recv", SyncManager.formatIdList(myRecvIds));  // что я получал от них
+        record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
+        record.put("sid", sessionId);
+
+        log.i("Publishing SYNC to " + shortTargetId +
+                " | sent=" + mySentIds + " | recv=" + myRecvIds);
+
+        WifiP2pDnsSdServiceInfo newSyncService = WifiP2pDnsSdServiceInfo.newInstance(
+                SYNC_SERVICE_NAME, SERVICE_TYPE, record);
+
+        // Удаляем предыдущий sync сервис
+        if (syncServiceInfo != null) {
+            manager.removeLocalService(channel, syncServiceInfo, new WifiP2pManager.ActionListener() {
+                @Override
+                public void onSuccess() {
+                    addSyncService(newSyncService);
+                }
+                @Override
+                public void onFailure(int r) {
+                    addSyncService(newSyncService);
+                }
+            });
+        } else {
+            addSyncService(newSyncService);
+        }
+    }
+
+    private void addSyncService(WifiP2pDnsSdServiceInfo service) {
+        manager.addLocalService(channel, service, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                syncServiceInfo = service;
+                log.success("SYNC service registered");
+
+                // Удаляем через SYNC_SERVICE_LIFETIME
+                handler.postDelayed(() -> {
+                    if (syncServiceInfo == service) {
+                        manager.removeLocalService(channel, syncServiceInfo, null);
+                        syncServiceInfo = null;
+                        log.d("SYNC service removed (timeout)");
+                    }
+                }, SYNC_SERVICE_LIFETIME);
+            }
+            @Override
+            public void onFailure(int r) {
+                log.w("Failed to register SYNC service: " + reasonToString(r));
+            }
+        });
+    }
+
+    private void handleSyncServiceRecord(Map<String, String> record, WifiP2pDevice device) {
+        String senderId = record.get("id");
+        String targetId = record.get("to");
+        String theirSent = record.get("sent");
+        String theirRecv = record.get("recv");
+        String sid = record.get("sid");
+
+        if (senderId == null || shortDeviceId.equals(senderId)) return;
+
+        // Это SYNC для нас?
+        if (targetId == null ||
+                (!targetId.equalsIgnoreCase(shortDeviceId) &&
+                        !shortDeviceId.startsWith(targetId))) {
+            return;
+        }
+
+        log.i("SYNC received from " + senderId +
+                " | theirSent=" + theirSent + " | theirRecv=" + theirRecv);
+
+        // Проверяем session ID
+        DeviceState state = stateRepository.get(senderId);
+        if (state != null && sid != null) {
+            if (state.lastSessionId != null && !sid.equals(state.lastSessionId)) {
+                log.w("SYNC from old session, ignoring");
+                return;
             }
         }
+
+        List<String> theirSentIds = SyncManager.parseIdList(theirSent);
+        List<String> theirRecvIds = SyncManager.parseIdList(theirRecv);
+
+        syncManager.processIncomingSync(senderId, theirSentIds, theirRecvIds);
+    }
+
+    private void resendMessage(String targetDeviceId, String msgId, String text) {
+        int slot = findFreeSlot();
+        if (slot < 0) slot = releaseOldestSlot();
+
+        log.i("RESENDING " + msgId + " to " + targetDeviceId + " slot=" + slot);
+        registerMessageSlot(slot, msgId, text, targetDeviceId);
     }
 
     // ==================== MESSAGE SLOTS ====================
@@ -868,7 +1048,7 @@ public class FastDiscoveryManager {
         record.put("s", String.valueOf(slotIndex));
         record.put("t", String.valueOf(System.currentTimeMillis() / 1000));
 
-        record.put("sid", sessionId); // [sessionId]
+        record.put("sid", sessionId);
 
         if (targetDeviceId != null) {
             record.put("to", targetDeviceId.length() > 8 ? targetDeviceId.substring(0, 8) : targetDeviceId);
@@ -939,14 +1119,20 @@ public class FastDiscoveryManager {
         log.divider("SETUP LISTENERS");
 
         WifiP2pManager.DnsSdTxtRecordListener txtListener = (fullDomain, record, device) -> {
-            int count = txtRecordsReceived.incrementAndGet();
-
             if (record == null || device == null) return;
 
             String senderId = record.get("id");
             if (shortDeviceId.equals(senderId)) return;
 
             String serviceName = extractServiceName(fullDomain);
+
+            // ДЕДУПЛИКАЦИЯ: проверяем не обрабатывали ли мы эту запись недавно
+            String dedupeKey = buildTxtDedupeKey(senderId, serviceName, record);
+            if (isDuplicateTxt(dedupeKey)) {
+                return;  // Пропускаем дубликат
+            }
+
+            int count = txtRecordsReceived.incrementAndGet();
             log.i("TXT #" + count + " | " + serviceName + " | from " + senderId);
 
             // Обрабатываем ACK из любого сервиса
@@ -963,6 +1149,8 @@ public class FastDiscoveryManager {
                 handleMessageSlotRecord(record, device, serviceName);
             } else if (serviceName != null && ACK_SERVICE_NAME.equalsIgnoreCase(serviceName)) {
                 handleAckServiceRecord(record, device);
+            } else if (serviceName != null && SYNC_SERVICE_NAME.equalsIgnoreCase(serviceName)) {
+                handleSyncServiceRecord(record, device);
             }
         };
 
@@ -977,11 +1165,91 @@ public class FastDiscoveryManager {
         log.success("DNS-SD listeners configured");
     }
 
+    // ==================== TXT DEDUPLICATION ====================
+
+    /**
+     * Построить ключ для дедупликации TXT записи
+     */
+    private String buildTxtDedupeKey(String senderId, String serviceName, Map<String, String> record) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(senderId).append("|");
+        sb.append(serviceName).append("|");
+
+        // Добавляем ключевые поля которые определяют уникальность
+        String msgId = record.get("mid");
+        if (msgId != null) {
+            sb.append("mid=").append(msgId).append("|");
+        }
+
+        String ack = record.get("ack");
+        if (ack != null) {
+            sb.append("ack=").append(ack).append("|");
+        }
+
+        String hb = record.get("hb");
+        if (hb != null) {
+            sb.append("hb=").append(hb).append("|");
+        }
+
+        String sent = record.get("sent");
+        if (sent != null) {
+            sb.append("sent=").append(sent).append("|");
+        }
+
+        String recv = record.get("recv");
+        if (recv != null) {
+            sb.append("recv=").append(recv);
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Проверить, является ли TXT запись дубликатом
+     */
+    private boolean isDuplicateTxt(String dedupeKey) {
+        long now = System.currentTimeMillis();
+
+        // Очищаем старые записи
+        recentTxtRecords.entrySet().removeIf(entry ->
+                now - entry.getValue() > TXT_DEDUP_WINDOW_MS);
+
+        // Ограничиваем размер
+        if (recentTxtRecords.size() >= MAX_RECENT_TXT_RECORDS) {
+            // Удаляем самую старую
+            String oldestKey = null;
+            long oldestTime = Long.MAX_VALUE;
+            for (Map.Entry<String, Long> entry : recentTxtRecords.entrySet()) {
+                if (entry.getValue() < oldestTime) {
+                    oldestTime = entry.getValue();
+                    oldestKey = entry.getKey();
+                }
+            }
+            if (oldestKey != null) {
+                recentTxtRecords.remove(oldestKey);
+            }
+        }
+
+        // Проверяем дубликат
+        Long lastSeen = recentTxtRecords.get(dedupeKey);
+        if (lastSeen != null && now - lastSeen < TXT_DEDUP_WINDOW_MS) {
+            return true;  // Дубликат
+        }
+
+        // Запоминаем
+        recentTxtRecords.put(dedupeKey, now);
+        return false;
+    }
+
     private void handleMainServiceRecord(Map<String, String> record, WifiP2pDevice device, String serviceName) {
         String senderId = record.get("id");
         if (senderId == null) return;
 
         DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
+
+        // Проверяем переход online ДО обновления lastSeen
+        boolean justCameOnline = dd.checkAndUpdateOnlineTransition();
+
         dd.deviceId = senderId;
         dd.hasOurApp = true;
         dd.lastSeen = System.currentTimeMillis();
@@ -993,10 +1261,23 @@ public class FastDiscoveryManager {
             try { dd.updateHeartbeat(Long.parseLong(hbStr)); } catch (NumberFormatException e) {}
         }
 
-        // [sessionId] сохраняем sid удалённого устройства
         String sid = record.get("sid");
         if (sid != null && !sid.isEmpty()) {
             dd.sessionId = sid;
+        }
+
+        // Обновляем репозиторий
+        DeviceState state = stateRepository.getOrCreate(senderId);
+        state.name = dd.name;
+        state.address = dd.address;
+        if (sid != null) {
+            state.lastSessionId = sid;
+        }
+
+        // Если устройство только что стало online - запускаем sync
+        if (justCameOnline && dd.deviceId != null) {
+            log.i("Device " + dd.getShortId() + " came online, triggering sync");
+            syncManager.onDeviceBecameOnline(dd.deviceId);
         }
 
         notifyDeviceUpdated(dd);
@@ -1008,8 +1289,8 @@ public class FastDiscoveryManager {
         String message = record.get("msg");
         String targetId = record.get("to");
         String slotStr = record.get("s");
-        String sid = record.get("sid");   // [sessionId]
-        String tStr = record.get("t");    // [TTL]
+        String sid = record.get("sid");
+        String tStr = record.get("t");
 
         if (senderId == null || msgId == null) return;
         if (targetId != null && !targetId.equals(shortDeviceId)) return;
@@ -1024,7 +1305,7 @@ public class FastDiscoveryManager {
             try { dd.lastSlotIndex = Integer.parseInt(slotStr); } catch (NumberFormatException e) {}
         }
 
-        // [TTL] Фильтрация по возрасту сообщения
+        // TTL фильтрация
         if (tStr != null) {
             try {
                 long msgTsSec = Long.parseLong(tStr);
@@ -1035,33 +1316,25 @@ public class FastDiscoveryManager {
                             " from " + senderId + " age=" + ageSec + "s");
                     return;
                 }
-            } catch (NumberFormatException e) {
-                // игнорируем ошибку парсинга, принимаем как есть
-            }
+            } catch (NumberFormatException e) {}
         }
 
-        // [sessionId] Фильтрация по sid (с учётом первого контакта)
+        // Session ID фильтрация
         if (sid != null) {
             if (dd.sessionId == null) {
-                // первое сообщение/контакт — запоминаем sid
                 dd.sessionId = sid;
             } else if (!sid.equals(dd.sessionId)) {
-                // сообщение из другой (старой) сессии этого же устройства – игнорируем
                 log.w("Ignoring stale message slot " + msgId +
                         " from " + senderId + " sid=" + sid +
                         " != currentSid=" + dd.sessionId);
                 return;
             }
         } else {
-            // sid отсутствует в сообщении
             if (dd.sessionId != null) {
-                // мы уже знаем sid устройства → считаем это устаревшим протоколом/мусором
                 log.w("Ignoring message slot " + msgId +
                         " from " + senderId + " without sid; deviceSid=" + dd.sessionId);
                 return;
             }
-            // dd.sessionId == null и sid == null → старый протокол / первый контакт
-            // Принимаем, чтобы не терять сообщения в одноверсионной среде
         }
 
         // Обновляем список видимых сообщений
@@ -1078,6 +1351,16 @@ public class FastDiscoveryManager {
 
             dd.addReceivedMessage(msgId, message);
 
+            // Сохранение в репозиторий для SYNC
+            DeviceState state = stateRepository.getOrCreate(senderId);
+            state.addRecvMessage(msgId, message);
+            state.name = dd.name;
+            state.address = dd.address;
+            if (sid != null) {
+                state.lastSessionId = sid;
+            }
+            stateRepository.save();
+
             log.success("MESSAGE RECEIVED: " + msgId + " from " + senderId);
             log.i("Content: " + message);
 
@@ -1092,7 +1375,7 @@ public class FastDiscoveryManager {
     private void handleAckServiceRecord(Map<String, String> record, WifiP2pDevice device) {
         String senderId = record.get("id");
         String acks = record.get("ack");
-        String sid = record.get("sid"); // [sessionId]
+        String sid = record.get("sid");
 
         if (senderId == null || shortDeviceId.equals(senderId)) return;
 
@@ -1101,7 +1384,7 @@ public class FastDiscoveryManager {
         dd.hasOurApp = true;
         dd.lastSeen = System.currentTimeMillis();
 
-        // [sessionId] Фильтрация ACK по sid
+        // Session ID фильтрация
         if (sid != null) {
             if (dd.sessionId == null) {
                 dd.sessionId = sid;
@@ -1116,7 +1399,6 @@ public class FastDiscoveryManager {
                         " without sid; deviceSid=" + dd.sessionId);
                 return;
             }
-            // dd.sessionId == null и sid == null → принимаем для совместимости
         }
 
         log.success("ACK SERVICE received from " + senderId + ": " + acks);
@@ -1125,7 +1407,6 @@ public class FastDiscoveryManager {
             processReceivedAcks(acks, dd);
         }
     }
-
     private void processReceivedAcks(String acks, DiscoveredDevice sender) {
         String[] ackList = acks.split(",");
         List<String> ackBatch = new ArrayList<>();
@@ -1136,14 +1417,41 @@ public class FastDiscoveryManager {
 
         for (String ack : ackBatch) {
             if (ack.startsWith(shortDeviceId + "_")) {
+
+                // ДЕДУПЛИКАЦИЯ: проверяем не обработан ли уже этот ACK
+                if (processedAcks.contains(ack)) {
+                    continue;  // Уже обработано
+                }
+
+                // Проверяем есть ли pending message
+                PendingMessage pm = pendingMessages.get(ack);
+                if (pm == null) {
+                    // Уже обработано ранее (слот освобождён)
+                    continue;
+                }
+
+                // Помечаем как обработанный
+                processedAcks.add(ack);
+                if (processedAcks.size() > MAX_PROCESSED_ACKS) {
+                    Iterator<String> it = processedAcks.iterator();
+                    if (it.hasNext()) { it.next(); it.remove(); }
+                }
+
                 log.success("ACK received for " + ack + " from " + sender.getShortId());
 
                 sender.markSentMessageAcked(ack, ackBatch);
 
-                PendingMessage pm = pendingMessages.remove(ack);
-                if (pm != null) {
-                    releaseSlot(pm.slotIndex);
+                // Помечаем в репозитории
+                if (sender.deviceId != null) {
+                    DeviceState state = stateRepository.get(sender.deviceId);
+                    if (state != null) {
+                        state.markAcked(ack);
+                        stateRepository.save();  // Теперь с debounce
+                    }
                 }
+
+                pendingMessages.remove(ack);
+                releaseSlot(pm.slotIndex);
 
                 if (listener != null) {
                     String finalAck = ack;
@@ -1161,7 +1469,8 @@ public class FastDiscoveryManager {
             String upper = instanceName.toUpperCase();
             if (upper.startsWith(MAIN_SERVICE_NAME.toUpperCase()) ||
                     upper.startsWith(MSG_SLOT_PREFIX.toUpperCase()) ||
-                    upper.startsWith(ACK_SERVICE_NAME.toUpperCase())) {
+                    upper.startsWith(ACK_SERVICE_NAME.toUpperCase()) ||
+                    upper.startsWith(SYNC_SERVICE_NAME.toUpperCase())) {
                 dd.hasOurApp = true;
             }
         }
@@ -1282,11 +1591,13 @@ public class FastDiscoveryManager {
         handler.removeCallbacks(ackUpdateRunnable);
         handler.removeCallbacks(visibilityCheckRunnable);
         handler.removeCallbacks(onlineCheckRunnable);
+        handler.removeCallbacks(syncCheckRunnable);
 
         handler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL);
         handler.postDelayed(ackUpdateRunnable, ACK_UPDATE_INTERVAL);
         handler.postDelayed(visibilityCheckRunnable, 5000);
         handler.postDelayed(onlineCheckRunnable, DEVICE_ONLINE_THRESHOLD / 2);
+        handler.postDelayed(syncCheckRunnable, SYNC_CHECK_INTERVAL);
     }
 
     private final Runnable heartbeatRunnable = new Runnable() {
@@ -1322,6 +1633,15 @@ public class FastDiscoveryManager {
             if (!isRunning) return;
             cleanupExpiredDevices();
             handler.postDelayed(this, DEVICE_ONLINE_THRESHOLD / 2);
+        }
+    };
+
+    private final Runnable syncCheckRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isRunning) return;
+            syncManager.checkSyncNeeded();
+            handler.postDelayed(this, SYNC_CHECK_INTERVAL);
         }
     };
 
