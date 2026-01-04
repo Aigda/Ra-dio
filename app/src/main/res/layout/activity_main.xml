@@ -5,6 +5,7 @@
     android:orientation="vertical"
     android:padding="8dp">
 
+    <!-- Статус-бар -->
     <TextView
         android:id="@+id/tv_status"
         android:layout_width="match_parent"
@@ -13,14 +14,16 @@
         android:padding="8dp"
         android:text="Запуск..."
         android:textSize="12sp"
-        android:fontFamily="monospace" />
+        android:fontFamily="monospace"
+        android:maxLines="3" />
 
+    <!-- Кнопки управления - верхний ряд -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:paddingTop="8dp"
-        android:paddingBottom="8dp">
+        android:paddingBottom="4dp">
 
         <Button
             android:id="@+id/btn_refresh"
@@ -28,7 +31,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginEnd="4dp"
-            android:text="Обновить"
+            android:text="🔄 Обновить"
             android:textSize="11sp" />
 
         <Button
@@ -37,7 +40,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginEnd="4dp"
-            android:text="Очистить"
+            android:text="🗑 Очистить"
             android:textSize="11sp" />
 
         <Button
@@ -45,11 +48,30 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Лог"
+            android:text="📋 Лог"
             android:textSize="11sp" />
 
     </LinearLayout>
 
+    <!-- Кнопки управления - нижний ряд -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="8dp">
+
+        <Button
+            android:id="@+id/btn_stop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⏹ Stop Service"
+            android:textSize="12sp"
+            android:backgroundTint="#F44336"
+            android:textColor="#FFFFFF" />
+
+    </LinearLayout>
+
+    <!-- Подсказка -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -59,6 +81,7 @@
         android:gravity="center"
         android:paddingBottom="4dp" />
 
+    <!-- Список устройств -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recycler_devices"
         android:layout_width="match_parent"

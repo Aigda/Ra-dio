@@ -1,0 +1,358 @@
+package com.example.directtest;
+
+import android.app.Service;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+
+import androidx.annotation.Nullable;
+
+import java.util.List;
+
+public class DiscoveryService extends Service implements FastDiscoveryManager.DiscoveryListener {
+
+    private static final String TAG = "DiscoveryService";
+
+    // Компоненты
+    private FastDiscoveryManager discoveryManager;
+    private NotificationHelper notificationHelper;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
+    // Binder для связи с Activity
+    private final IBinder binder = new LocalBinder();
+
+    // Callback для Activity
+    private ServiceCallback serviceCallback;
+
+    // Периодическое обновление уведомления
+    private final Runnable statusUpdateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            updateNotificationStatus();
+            handler.postDelayed(this, 3000); // Каждые 3 секунды
+        }
+    };
+
+    // ==================== BINDER ====================
+
+    public class LocalBinder extends Binder {
+        public DiscoveryService getService() {
+            return DiscoveryService.this;
+        }
+    }
+
+    public interface ServiceCallback {
+        void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device);
+        void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device);
+        void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device);
+        void onMessageSent(String messageId, String message, String targetDeviceId);
+        void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message);
+        void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId);
+        void onError(String message);
+    }
+
+    // ==================== LIFECYCLE ====================
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        log("onCreate");
+
+        // Создаём NotificationHelper
+        notificationHelper = new NotificationHelper(this);
+
+        // Создаём FastDiscoveryManager
+        discoveryManager = new FastDiscoveryManager(this);
+
+        // Запускаем как Foreground Service
+        startForegroundService();
+
+        // Запускаем discovery
+        discoveryManager.start(this);
+
+        // Периодическое обновление статуса
+        handler.postDelayed(statusUpdateRunnable, 1000);
+
+        log("Service created and discovery started");
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        log("onStartCommand");
+
+        // Обработка команды остановки
+        if (intent != null && NotificationHelper.ACTION_STOP_SERVICE.equals(intent.getAction())) {
+            log("Stop command received");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        // Возвращаем START_STICKY - система перезапустит сервис если он убит
+        return START_STICKY;
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        log("onBind");
+        return binder;
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        log("onUnbind");
+        // Сервис продолжает работать даже после отключения Activity
+        return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        log("onDestroy");
+
+        // Останавливаем обновления
+        handler.removeCallbacksAndMessages(null);
+
+        // Останавливаем discovery
+        if (discoveryManager != null) {
+            discoveryManager.stop();
+            discoveryManager = null;
+        }
+
+        super.onDestroy();
+        log("Service destroyed");
+    }
+
+    // ==================== FOREGROUND SERVICE ====================
+
+    private void startForegroundService() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                        NotificationHelper.NOTIFICATION_ID,
+                        notificationHelper.buildForegroundNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                );
+            } else {
+                startForeground(
+                        NotificationHelper.NOTIFICATION_ID,
+                        notificationHelper.buildForegroundNotification()
+                );
+            }
+            log("Foreground service started");
+        } catch (Exception e) {
+            log("Error starting foreground: " + e.getMessage());
+        }
+    }
+
+    private void updateNotificationStatus() {
+        if (discoveryManager == null || notificationHelper == null) return;
+
+        int total = discoveryManager.getDeviceCount();
+        int onlineWithApp = countOnlineWithApp();
+
+        notificationHelper.updateStatus(total, onlineWithApp);
+    }
+
+    private int countOnlineWithApp() {
+        if (discoveryManager == null) return 0;
+
+        int count = 0;
+        for (FastDiscoveryManager.DiscoveredDevice device : discoveryManager.getAllDevices()) {
+            if (device.isOnline() && device.hasOurApp) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // ==================== PUBLIC API (для Activity) ====================
+
+    /**
+     * Получить FastDiscoveryManager
+     */
+    public FastDiscoveryManager getDiscoveryManager() {
+        return discoveryManager;
+    }
+
+    /**
+     * Установить callback для Activity
+     */
+    public void setServiceCallback(ServiceCallback callback) {
+        this.serviceCallback = callback;
+    }
+
+    /**
+     * Удалить callback
+     */
+    public void removeServiceCallback() {
+        this.serviceCallback = null;
+    }
+
+    /**
+     * Получить список устройств
+     */
+    public List<FastDiscoveryManager.DiscoveredDevice> getAllDevices() {
+        if (discoveryManager != null) {
+            return discoveryManager.getAllDevices();
+        }
+        return java.util.Collections.emptyList();
+    }
+
+    /**
+     * Отправить сообщение
+     */
+    public String sendMessage(String message, String targetDeviceId) {
+        if (discoveryManager != null) {
+            return discoveryManager.sendMessage(message, targetDeviceId);
+        }
+        return null;
+    }
+
+    /**
+     * Принудительное обновление
+     */
+    public void forceRefresh() {
+        if (discoveryManager != null) {
+            discoveryManager.forceRefresh();
+        }
+    }
+
+    /**
+     * Очистить всё
+     */
+    public void clearAll() {
+        if (discoveryManager != null) {
+            discoveryManager.clearAll();
+        }
+    }
+
+    /**
+     * Проверить, работает ли сервис
+     */
+    public boolean isRunning() {
+        return discoveryManager != null && discoveryManager.isRunning();
+    }
+
+    /**
+     * Получить ID устройства
+     */
+    public String getShortDeviceId() {
+        return discoveryManager != null ? discoveryManager.getShortDeviceId() : "???";
+    }
+
+    /**
+     * Получить Session ID
+     */
+    public String getSessionId() {
+        return discoveryManager != null ? discoveryManager.getSessionId() : "???";
+    }
+
+    /**
+     * Получить счётчик heartbeat
+     */
+    public long getHeartbeatSeq() {
+        return discoveryManager != null ? discoveryManager.getHeartbeatSeq() : 0;
+    }
+
+    /**
+     * Получить количество TXT записей
+     */
+    public int getTxtRecordsReceived() {
+        return discoveryManager != null ? discoveryManager.getTxtRecordsReceived() : 0;
+    }
+
+    /**
+     * Получить количество pending ACK
+     */
+    public int getPendingAcksCount() {
+        return discoveryManager != null ? discoveryManager.getPendingAcksCount() : 0;
+    }
+
+    // ==================== DISCOVERY LISTENER ====================
+
+    @Override
+    public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
+        log("Device found: " + device.getShortId());
+        updateNotificationStatus();
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onDeviceFound(device));
+        }
+    }
+
+    @Override
+    public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
+        updateNotificationStatus();
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onDeviceUpdated(device));
+        }
+    }
+
+    @Override
+    public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
+        log("Device lost: " + device.getShortId());
+        updateNotificationStatus();
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onDeviceLost(device));
+        }
+    }
+
+    @Override
+    public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice device, boolean isOnline) {
+        log("Device " + device.getShortId() + " online: " + isOnline);
+        updateNotificationStatus();
+    }
+
+    @Override
+    public void onStatusChanged(String status) {
+        log("Status: " + status);
+    }
+
+    @Override
+    public void onError(String message) {
+        log("Error: " + message);
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onError(message));
+        }
+    }
+
+    @Override
+    public void onMessageSent(String messageId, String message, String targetDeviceId) {
+        log("Message sent: " + messageId);
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onMessageSent(messageId, message, targetDeviceId));
+        }
+    }
+
+    @Override
+    public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message) {
+        log("Message received: " + messageId + " from " + device.getShortId());
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onMessageReceived(device, messageId, message));
+        }
+    }
+
+    @Override
+    public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
+        log("ACK received: " + ackedMessageId);
+
+        if (serviceCallback != null) {
+            handler.post(() -> serviceCallback.onAckReceived(device, ackedMessageId));
+        }
+    }
+
+    // ==================== LOGGING ====================
+
+    private void log(String message) {
+        DiagnosticLogger.getInstance().i("[Service] " + message);
+    }
+}

@@ -1,11 +1,15 @@
 package com.example.directtest;
 
 import android.Manifest;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -26,16 +30,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements DiscoveryService.ServiceCallback {
 
     private static final int PERMISSION_REQUEST_CODE = 1001;
+    private static final int NOTIFICATION_PERMISSION_CODE = 1002;
 
-    private FastDiscoveryManager discoveryManager;
+    // Сервис
+    private DiscoveryService discoveryService;
+    private boolean serviceBound = false;
+
+    // UI
     private DeviceAdapter adapter;
     private final List<FastDiscoveryManager.DiscoveredDevice> devices = new ArrayList<>();
-
     private TextView tvStatus;
+    private Button btnStop;
 
+    // Периодическое обновление UI
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable uiUpdateRunnable = new Runnable() {
         @Override
@@ -48,52 +58,63 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    // ==================== SERVICE CONNECTION ====================
+
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            DiscoveryService.LocalBinder localBinder = (DiscoveryService.LocalBinder) binder;
+            discoveryService = localBinder.getService();
+            serviceBound = true;
+
+            // Устанавливаем callback
+            discoveryService.setServiceCallback(MainActivity.this);
+
+            // Загружаем текущие устройства
+            refreshDeviceList();
+
+            // Обновляем UI
+            updateStatusBar();
+            updateStopButton();
+
+            Toast.makeText(MainActivity.this, "Service connected", Toast.LENGTH_SHORT).show();
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            discoveryService = null;
+            serviceBound = false;
+            updateStopButton();
+        }
+    };
+
+    // ==================== LIFECYCLE ====================
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        tvStatus = findViewById(R.id.tv_status);
-        Button btnRefresh = findViewById(R.id.btn_refresh);
-        Button btnClear = findViewById(R.id.btn_clear);
-        Button btnLog = findViewById(R.id.btn_log);
-
-        RecyclerView recyclerView = findViewById(R.id.recycler_devices);
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
-        adapter = new DeviceAdapter(devices, this::onDeviceClick);
-        recyclerView.setAdapter(adapter);
-
-        btnRefresh.setOnClickListener(v -> {
-            if (discoveryManager != null) {
-                discoveryManager.forceRefresh();
-                Toast.makeText(this, "Обновление...", Toast.LENGTH_SHORT).show();
-            }
-        });
-
-        btnClear.setOnClickListener(v -> {
-            new AlertDialog.Builder(this)
-                    .setTitle("Очистка")
-                    .setMessage("Очистить все сообщения, подтверждения и логи?")
-                    .setPositiveButton("Да", (d, w) -> {
-                        if (discoveryManager != null) {
-                            discoveryManager.clearAll();
-                            adapter.notifyDataSetChanged();
-                            Toast.makeText(this, "Очищено", Toast.LENGTH_SHORT).show();
-                        }
-                    })
-                    .setNegativeButton("Нет", null)
-                    .show();
-        });
-
-        btnLog.setOnClickListener(v -> startActivity(new Intent(this, DiagnosticActivity.class)));
-
+        initViews();
         checkAndRequestPermissions();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // Привязываемся к сервису если он запущен
+        bindToServiceIfRunning();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         uiHandler.post(uiUpdateRunnable);
+
+        // Обновляем список устройств
+        if (serviceBound) {
+            refreshDeviceList();
+        }
     }
 
     @Override
@@ -102,8 +123,240 @@ public class MainActivity extends AppCompatActivity {
         uiHandler.removeCallbacks(uiUpdateRunnable);
     }
 
+    @Override
+    protected void onStop() {
+        super.onStop();
+        // Отвязываемся от сервиса (но сервис продолжает работать!)
+        unbindFromService();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        uiHandler.removeCallbacksAndMessages(null);
+    }
+
+    // ==================== INIT ====================
+
+    private void initViews() {
+        tvStatus = findViewById(R.id.tv_status);
+        Button btnRefresh = findViewById(R.id.btn_refresh);
+        Button btnClear = findViewById(R.id.btn_clear);
+        Button btnLog = findViewById(R.id.btn_log);
+
+        // Находим или создаём кнопку Stop
+        // Если её нет в layout, можно использовать btnClear как toggle
+        btnStop = findViewById(R.id.btn_stop);
+        if (btnStop == null) {
+            // Используем btnClear для остановки через долгое нажатие
+            btnClear.setOnLongClickListener(v -> {
+                stopDiscoveryService();
+                return true;
+            });
+        }
+
+        RecyclerView recyclerView = findViewById(R.id.recycler_devices);
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        adapter = new DeviceAdapter(devices, this::onDeviceClick);
+        recyclerView.setAdapter(adapter);
+
+        // Кнопка обновления
+        btnRefresh.setOnClickListener(v -> {
+            if (serviceBound && discoveryService != null) {
+                discoveryService.forceRefresh();
+                Toast.makeText(this, "Обновление...", Toast.LENGTH_SHORT).show();
+            } else {
+                // Сервис не запущен - запускаем
+                startDiscoveryService();
+            }
+        });
+
+        // Кнопка очистки
+        btnClear.setOnClickListener(v -> {
+            new AlertDialog.Builder(this)
+                    .setTitle("Очистка")
+                    .setMessage("Очистить все сообщения, подтверждения и логи?")
+                    .setPositiveButton("Да", (d, w) -> {
+                        if (serviceBound && discoveryService != null) {
+                            discoveryService.clearAll();
+                            adapter.notifyDataSetChanged();
+                            Toast.makeText(this, "Очищено", Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setNegativeButton("Нет", null)
+                    .show();
+        });
+
+        // Кнопка логов
+        btnLog.setOnClickListener(v -> startActivity(new Intent(this, DiagnosticActivity.class)));
+
+        // Кнопка остановки (если есть)
+        if (btnStop != null) {
+            btnStop.setOnClickListener(v -> {
+                if (serviceBound) {
+                    stopDiscoveryService();
+                } else {
+                    startDiscoveryService();
+                }
+            });
+        }
+    }
+
+    private void updateStopButton() {
+        if (btnStop != null) {
+            if (serviceBound) {
+                btnStop.setText("Stop");
+                btnStop.setEnabled(true);
+            } else {
+                btnStop.setText("Start");
+                btnStop.setEnabled(true);
+            }
+        }
+    }
+
+    // ==================== PERMISSIONS ====================
+
+    private void checkAndRequestPermissions() {
+        List<String> perms = new ArrayList<>();
+
+        // Location permission
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            perms.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+
+        // Nearby WiFi devices (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES)
+                    != PackageManager.PERMISSION_GRANTED) {
+                perms.add(Manifest.permission.NEARBY_WIFI_DEVICES);
+            }
+        }
+
+        if (perms.isEmpty()) {
+            // Основные разрешения есть - проверяем уведомления
+            checkNotificationPermission();
+        } else {
+            ActivityCompat.requestPermissions(this, perms.toArray(new String[0]), PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    private void checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                // Запрашиваем разрешение на уведомления
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                        NOTIFICATION_PERMISSION_CODE);
+                return;
+            }
+        }
+        // Все разрешения есть - запускаем сервис
+        startDiscoveryService();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean allGranted = true;
+            for (int r : results) {
+                if (r != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+
+            if (allGranted) {
+                checkNotificationPermission();
+            } else {
+                tvStatus.setText("Permissions required");
+                Toast.makeText(this, "Требуются разрешения для работы", Toast.LENGTH_LONG).show();
+            }
+        } else if (requestCode == NOTIFICATION_PERMISSION_CODE) {
+            // Даже если отказали - запускаем сервис (уведомление может не показаться)
+            startDiscoveryService();
+        }
+    }
+
+    // ==================== SERVICE MANAGEMENT ====================
+
+    private void startDiscoveryService() {
+        tvStatus.setText("Starting service...");
+
+        Intent intent = new Intent(this, DiscoveryService.class);
+
+        // Запускаем как foreground service
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+
+        // Привязываемся
+        bindToService();
+    }
+
+    private void stopDiscoveryService() {
+        // Отвязываемся
+        unbindFromService();
+
+        // Останавливаем сервис
+        Intent intent = new Intent(this, DiscoveryService.class);
+        stopService(intent);
+
+        // Очищаем UI
+        devices.clear();
+        adapter.notifyDataSetChanged();
+        tvStatus.setText("Service stopped");
+
+        Toast.makeText(this, "Service stopped", Toast.LENGTH_SHORT).show();
+    }
+
+    private void bindToService() {
+        Intent intent = new Intent(this, DiscoveryService.class);
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private void bindToServiceIfRunning() {
+        // Пытаемся привязаться к уже запущенному сервису
+        Intent intent = new Intent(this, DiscoveryService.class);
+        bindService(intent, serviceConnection, 0); // Без BIND_AUTO_CREATE - не создаём если нет
+    }
+
+    private void unbindFromService() {
+        if (serviceBound) {
+            if (discoveryService != null) {
+                discoveryService.removeServiceCallback();
+            }
+            try {
+                unbindService(serviceConnection);
+            } catch (Exception e) {
+                // Ignore
+            }
+            serviceBound = false;
+            discoveryService = null;
+        }
+    }
+
+    // ==================== UI UPDATES ====================
+
+    private void refreshDeviceList() {
+        if (discoveryService != null) {
+            List<FastDiscoveryManager.DiscoveredDevice> serviceDevices = discoveryService.getAllDevices();
+            devices.clear();
+            devices.addAll(serviceDevices);
+            adapter.notifyDataSetChanged();
+        }
+    }
+
     private void updateStatusBar() {
-        if (discoveryManager == null) return;
+        if (!serviceBound || discoveryService == null) {
+            tvStatus.setText("Service not running\nTap REFRESH to start");
+            return;
+        }
 
         int total = devices.size();
         int online = 0, withApp = 0;
@@ -113,98 +366,35 @@ public class MainActivity extends AppCompatActivity {
         }
 
         tvStatus.setText(String.format(Locale.getDefault(),
-                "ID:%s | Dev:%d On:%d App:%d\nHB#%d | TXT:%d | ACK:%d",
-                discoveryManager.getShortDeviceId(),
+                "ID:%s SID:%s | Dev:%d On:%d App:%d\nHB#%d | TXT:%d | ACK:%d",
+                discoveryService.getShortDeviceId(),
+                discoveryService.getSessionId(),
                 total, online, withApp,
-                discoveryManager.getHeartbeatSeq(),
-                discoveryManager.getTxtRecordsReceived(),
-                discoveryManager.getPendingAcksCount()));
-    }
-
-    private void checkAndRequestPermissions() {
-        List<String> perms = new ArrayList<>();
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
-            perms.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES)
-                    != PackageManager.PERMISSION_GRANTED) {
-                perms.add(Manifest.permission.NEARBY_WIFI_DEVICES);
-            }
-        }
-
-        if (perms.isEmpty()) {
-            startDiscovery();
-        } else {
-            ActivityCompat.requestPermissions(this, perms.toArray(new String[0]), PERMISSION_REQUEST_CODE);
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] results) {
-        super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            boolean allGranted = true;
-            for (int r : results) if (r != PackageManager.PERMISSION_GRANTED) allGranted = false;
-            if (allGranted) startDiscovery();
-            else tvStatus.setText("Permissions required");
-        }
-    }
-
-    private void startDiscovery() {
-        tvStatus.setText("Starting...");
-        discoveryManager = new FastDiscoveryManager(this);
-        discoveryManager.start(new FastDiscoveryManager.DiscoveryListener() {
-            @Override public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice d) {
-                runOnUiThread(() -> updateDevice(d));
-            }
-            @Override public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice d) {
-                runOnUiThread(() -> updateDevice(d));
-            }
-            @Override public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice d) {
-                runOnUiThread(() -> { devices.remove(d); adapter.notifyDataSetChanged(); });
-            }
-            @Override public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice d, boolean on) {}
-            @Override public void onStatusChanged(String s) {}
-            @Override public void onError(String m) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this, m, Toast.LENGTH_SHORT).show());
-            }
-            @Override public void onMessageSent(String id, String msg, String target) {
-                runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "→ " + id, Toast.LENGTH_SHORT).show();
-                    adapter.notifyDataSetChanged();
-                });
-            }
-            @Override public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice d, String id, String msg) {
-                runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "← " + d.getShortId() + ": " + msg, Toast.LENGTH_LONG).show();
-                    adapter.notifyDataSetChanged();
-                });
-            }
-            @Override public void onAckReceived(FastDiscoveryManager.DiscoveredDevice d, String ackId) {
-                runOnUiThread(() -> {
-                    Toast.makeText(MainActivity.this, "✓ " + ackId, Toast.LENGTH_SHORT).show();
-                    adapter.notifyDataSetChanged();
-                });
-            }
-        });
+                discoveryService.getHeartbeatSeq(),
+                discoveryService.getTxtRecordsReceived(),
+                discoveryService.getPendingAcksCount()));
     }
 
     private void updateDevice(FastDiscoveryManager.DiscoveredDevice device) {
         int idx = -1;
         for (int i = 0; i < devices.size(); i++) {
-            if (devices.get(i).address.equals(device.address)) { idx = i; break; }
+            if (devices.get(i).address.equals(device.address)) {
+                idx = i;
+                break;
+            }
         }
-        if (idx >= 0) devices.set(idx, device); else devices.add(device);
+        if (idx >= 0) {
+            devices.set(idx, device);
+        } else {
+            devices.add(device);
+        }
         adapter.notifyDataSetChanged();
     }
 
-    /**
-     * Нажатие на устройство — отправка сообщения
-     */
+    // ==================== DEVICE CLICK ====================
+
     private void onDeviceClick(FastDiscoveryManager.DiscoveredDevice device) {
-        if (discoveryManager == null) {
+        if (!serviceBound || discoveryService == null) {
             Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -221,16 +411,50 @@ public class MainActivity extends AppCompatActivity {
 
         // Генерируем уникальное сообщение
         String text = "Hello @" + System.currentTimeMillis() % 10000;
-        String msgId = discoveryManager.sendMessage(text, device.deviceId);
+        String msgId = discoveryService.sendMessage(text, device.deviceId);
 
         Toast.makeText(this, "→ " + device.getShortId() + "\n" + msgId, Toast.LENGTH_SHORT).show();
     }
 
+    // ==================== SERVICE CALLBACK ====================
+
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        uiHandler.removeCallbacksAndMessages(null);
-        if (discoveryManager != null) discoveryManager.stop();
+    public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
+        updateDevice(device);
+    }
+
+    @Override
+    public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
+        updateDevice(device);
+    }
+
+    @Override
+    public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
+        devices.remove(device);
+        adapter.notifyDataSetChanged();
+    }
+
+    @Override
+    public void onMessageSent(String messageId, String message, String targetDeviceId) {
+        Toast.makeText(this, "→ " + messageId, Toast.LENGTH_SHORT).show();
+        adapter.notifyDataSetChanged();
+    }
+
+    @Override
+    public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message) {
+        Toast.makeText(this, "← " + device.getShortId() + ": " + message, Toast.LENGTH_LONG).show();
+        adapter.notifyDataSetChanged();
+    }
+
+    @Override
+    public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
+        Toast.makeText(this, "✓ " + ackedMessageId, Toast.LENGTH_SHORT).show();
+        adapter.notifyDataSetChanged();
+    }
+
+    @Override
+    public void onError(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
     // ==================== ADAPTER ====================
@@ -240,14 +464,17 @@ public class MainActivity extends AppCompatActivity {
         private final List<FastDiscoveryManager.DiscoveredDevice> list;
         private final OnClick listener;
 
-        interface OnClick { void onClick(FastDiscoveryManager.DiscoveredDevice d); }
+        interface OnClick {
+            void onClick(FastDiscoveryManager.DiscoveredDevice d);
+        }
 
         DeviceAdapter(List<FastDiscoveryManager.DiscoveredDevice> list, OnClick l) {
             this.list = list;
             this.listener = l;
         }
 
-        @NonNull @Override
+        @NonNull
+        @Override
         public VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_device, parent, false);
             return new VH(v);
@@ -267,6 +494,16 @@ public class MainActivity extends AppCompatActivity {
             // ID
             String id = d.deviceId != null ? d.deviceId.substring(0, Math.min(8, d.deviceId.length())) : "?";
             h.tvId.setText(String.format("ID: %s | MAC: %s", id, d.address));
+
+            // Session ID
+            if (h.tvSessionId != null) {
+                if (d.sessionId != null) {
+                    h.tvSessionId.setVisibility(View.VISIBLE);
+                    h.tvSessionId.setText(String.format("SID: %s", d.sessionId));
+                } else {
+                    h.tvSessionId.setVisibility(View.GONE);
+                }
+            }
 
             // App status
             h.tvApp.setText(String.format("%s | Seen: %dx | %ds ago",
@@ -361,10 +598,13 @@ public class MainActivity extends AppCompatActivity {
             return s.length() <= max ? s : s.substring(0, max) + "…";
         }
 
-        @Override public int getItemCount() { return list.size(); }
+        @Override
+        public int getItemCount() {
+            return list.size();
+        }
 
         static class VH extends RecyclerView.ViewHolder {
-            TextView tvName, tvStatus, tvId, tvApp, tvHb;
+            TextView tvName, tvStatus, tvId, tvSessionId, tvApp, tvHb;
             TextView tvRecv1, tvRecv1Ack, tvRecv2, tvRecv2Ack, tvRecv3, tvRecv3Ack;
             TextView tvSent1, tvSent1Ack, tvSent2, tvSent2Ack, tvSent3, tvSent3Ack;
             TextView tvService;
@@ -374,6 +614,7 @@ public class MainActivity extends AppCompatActivity {
                 tvName = v.findViewById(R.id.tv_device_name);
                 tvStatus = v.findViewById(R.id.tv_status_indicator);
                 tvId = v.findViewById(R.id.tv_device_id);
+                tvSessionId = v.findViewById(R.id.tv_session_id);
                 tvApp = v.findViewById(R.id.tv_app_status);
                 tvHb = v.findViewById(R.id.tv_heartbeat_info);
 

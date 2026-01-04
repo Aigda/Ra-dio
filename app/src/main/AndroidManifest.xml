@@ -2,18 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Основные разрешения для Wi-Fi Direct / P2P -->
+    <!-- ==================== WIFI P2P ==================== -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
 
-    <!-- Для Android 13+ (API 33+) рекомендуется -->
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- ==================== FOREGROUND SERVICE ==================== -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
-    <!-- Не обязательно, но полезно для отладки -->
+    <!-- ==================== NOTIFICATIONS (Android 13+) ==================== -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ==================== OTHER ==================== -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
@@ -27,9 +32,12 @@
         android:theme="@style/Theme.DirectTest"
         tools:targetApi="31">
 
+        <!-- ==================== ACTIVITIES ==================== -->
+
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -40,6 +48,14 @@
             android:name=".DiagnosticActivity"
             android:exported="false"
             android:theme="@style/Theme.DirectTest" />
+
+        <!-- ==================== FOREGROUND SERVICE ==================== -->
+
+        <service
+            android:name=".DiscoveryService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
     </application>
 

@@ -38,6 +38,15 @@
         android:textColor="#666666"
         android:fontFamily="monospace" />
 
+    <!-- ✅ НОВОЕ: Session ID -->
+    <TextView
+        android:id="@+id/tv_session_id"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="10sp"
+        android:textColor="#9C27B0"
+        android:fontFamily="monospace" />
+
     <TextView
         android:id="@+id/tv_app_status"
         android:layout_width="match_parent"

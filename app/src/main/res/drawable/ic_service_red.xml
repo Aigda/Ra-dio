@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- WiFi signal icon - green (online) -->
+
+    <!-- Outer arc -->
+    <path
+        android:pathData="M12,3C7.46,3 3.34,4.78 0.29,7.67L12,21L23.71,7.67C20.66,4.78 16.54,3 12,3Z"
+        android:fillColor="#F44336"
+        android:fillAlpha="0.3"/>
+
+    <!-- Middle arc -->
+    <path
+        android:pathData="M12,6C8.62,6 5.5,7.12 3,9.04L12,21L21,9.04C18.5,7.12 15.38,6 12,6Z"
+        android:fillColor="#F44336"
+        android:fillAlpha="0.6"/>
+
+    <!-- Inner arc -->
+    <path
+        android:pathData="M12,9C9.77,9 7.72,9.65 6,10.74L12,21L18,10.74C16.28,9.65 14.23,9 12,9Z"
+        android:fillColor="#F44336"/>
+
+    <!-- Center dot (круг через path) -->
+    <path
+        android:pathData="M12,15.5a2.5,2.5 0,1 0,0 5a2.5,2.5 0,1 0,0 -5z"
+        android:fillColor="#F44336"/>
+
+</vector>
