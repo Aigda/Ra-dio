@@ -1748,7 +1748,7 @@ public class FastDiscoveryManager {
         handler.removeCallbacks(onlineCheckRunnable);
         handler.removeCallbacks(syncCheckRunnable);
         handler.removeCallbacks(dnsCacheResetRunnable);  // ДОБАВИТЬ
-        handler.removeCallbacks(serviceReregisterRunnable);  // ДОБАВИТЬ
+        //handler.removeCallbacks(serviceReregisterRunnable);  // ДОБАВИТЬ
 
         handler.postDelayed(heartbeatRunnable, P2pConfig.HEARTBEAT_INTERVAL);
         handler.postDelayed(ackUpdateRunnable, P2pConfig.ACK_UPDATE_INTERVAL);
@@ -1756,7 +1756,7 @@ public class FastDiscoveryManager {
         handler.postDelayed(onlineCheckRunnable, P2pConfig.DEVICE_ONLINE_THRESHOLD / 2);
         handler.postDelayed(syncCheckRunnable, P2pConfig.SYNC_CHECK_INTERVAL);
         handler.postDelayed(dnsCacheResetRunnable, DNS_CACHE_RESET_INTERVAL);  // ДОБАВИТЬ
-        handler.postDelayed(serviceReregisterRunnable, SERVICE_REREGISTER_INTERVAL);  // ДОБАВИТЬ
+        //handler.postDelayed(serviceReregisterRunnable, SERVICE_REREGISTER_INTERVAL);  // ДОБАВИТЬ
     }
 
     private final Runnable heartbeatRunnable = new Runnable() {
