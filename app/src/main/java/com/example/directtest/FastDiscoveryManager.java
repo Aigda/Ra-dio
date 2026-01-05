@@ -354,11 +354,17 @@ public class FastDiscoveryManager {
 
     // ==================== CONSTRUCTOR ====================
 
+// В секции STATE добавить комментарий
+// Session ID теперь timestamp-based (hex) для возможности сравнения
+
+    // Изменить конструктор
     public FastDiscoveryManager(Context context) {
         this.context = context.getApplicationContext();
         this.deviceId = generateDeviceId();
         this.shortDeviceId = deviceId.substring(0, 8);
-        this.sessionId = UUID.randomUUID().toString().substring(0, 8);
+
+        // ИЗМЕНЕНО: timestamp-based sessionId
+        this.sessionId = generateSessionId();
 
         // Инициализация SYNC системы
         stateRepository = new DeviceStateRepository(context);
@@ -388,6 +394,95 @@ public class FastDiscoveryManager {
         log.i("Loaded " + stateRepository.getAll().size() + " saved devices");
         log.i("Android: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
         log.i("Model: " + Build.MODEL);
+    }
+
+    /**
+     * Генерация sessionId на основе timestamp.
+     * Формат: hex-encoded секунды (8 символов).
+     * Позволяет сравнивать sessionId для определения более новой сессии.
+     */
+    private String generateSessionId() {
+        long timestampSec = System.currentTimeMillis() / 1000;
+        return Long.toHexString(timestampSec);
+    }
+
+    /**
+     * Сравнить два sessionId.
+     * @return true если newSid новее (больше) чем oldSid
+     */
+    private boolean isNewerSessionId(String newSid, String oldSid) {
+        if (newSid == null) return false;
+        if (oldSid == null) return true;
+        if (newSid.equals(oldSid)) return false;
+
+        try {
+            // Сравниваем как hex timestamp
+            long newTs = Long.parseLong(newSid, 16);
+            long oldTs = Long.parseLong(oldSid, 16);
+            return newTs > oldTs;
+        } catch (NumberFormatException e) {
+            // Один или оба не в hex формате
+            try {
+                // Если newSid - hex timestamp, а oldSid - нет, считаем новый новее
+                Long.parseLong(newSid, 16);
+                return true;
+            } catch (NumberFormatException e2) {
+                // newSid тоже не hex - сравниваем как строки
+                return newSid.compareTo(oldSid) > 0;
+            }
+        }
+    }
+
+    /**
+     * Проверить и обновить sessionId устройства.
+     * @return true если запись валидна и должна быть обработана
+     */
+    private boolean validateSessionId(String senderId, String incomingSid, DiscoveredDevice dd) {
+        if (incomingSid == null || incomingSid.isEmpty()) {
+            return true; // Старый формат без sessionId
+        }
+
+        if (dd.sessionId == null) {
+            // Первый контакт - запоминаем
+            dd.sessionId = incomingSid;
+            log.i("Session set for " + senderId + ": " + incomingSid);
+
+            // Проверяем в репозитории
+            DeviceState state = stateRepository.getOrCreate(senderId);
+            if (state.lastSessionId != null && isNewerSessionId(incomingSid, state.lastSessionId)) {
+                log.w("New session for " + senderId + " (repo): " + state.lastSessionId + " -> " + incomingSid);
+                state.clearMessages();
+                dd.clearHistory();
+            }
+            state.lastSessionId = incomingSid;
+            stateRepository.save();
+            return true;
+        }
+
+        if (incomingSid.equals(dd.sessionId)) {
+            // Совпадает - OK
+            return true;
+        }
+
+        if (isNewerSessionId(incomingSid, dd.sessionId)) {
+            // Новый sessionId больше - устройство перезапустилось
+            log.w("Newer session for " + senderId + ": " + dd.sessionId + " -> " + incomingSid);
+            dd.sessionId = incomingSid;
+            dd.clearHistory();
+
+            DeviceState state = stateRepository.get(senderId);
+            if (state != null) {
+                state.clearMessages();
+                state.lastSessionId = incomingSid;
+                stateRepository.save();
+            }
+            return true;
+        }
+
+        // Старый sessionId - это кэш, игнорируем
+        log.d("Ignoring older cached record from " + senderId +
+                " sid=" + incomingSid + " (current: " + dd.sessionId + ")");
+        return false;
     }
 
     private String generateDeviceId() {
@@ -1261,7 +1356,15 @@ public class FastDiscoveryManager {
 
         DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
 
-        // Проверяем переход online ДО обновления lastSeen
+        String sid = record.get("sid");
+
+        // Валидация sessionId
+        if (!validateSessionId(senderId, sid, dd)) {
+            dd.lastSeen = System.currentTimeMillis(); // Обновляем для online статуса
+            return;
+        }
+
+        // Проверяем переход online
         boolean justCameOnline = dd.checkAndUpdateOnlineTransition();
 
         dd.deviceId = senderId;
@@ -1275,38 +1378,12 @@ public class FastDiscoveryManager {
             try { dd.updateHeartbeat(Long.parseLong(hbStr)); } catch (NumberFormatException e) {}
         }
 
-        String sid = record.get("sid");
-        if (sid != null && !sid.isEmpty()) {
-            // ДОБАВЛЕНО: Проверяем смену сессии
-            if (dd.sessionId != null && !sid.equals(dd.sessionId)) {
-                log.w("Session changed for " + senderId + ": " + dd.sessionId + " -> " + sid);
-                // Очищаем историю сообщений - это НОВАЯ сессия устройства
-                dd.clearHistory();
 
-                // Также очищаем в репозитории
-                DeviceState state = stateRepository.get(senderId);
-                if (state != null) {
-                    state.clearMessages();
-                    state.lastSessionId = sid;
-                    stateRepository.save();
-                    log.i("Cleared message history for " + senderId + " due to session change");
-                }
-            }
-            dd.sessionId = sid;
-        }
 
         // Обновляем репозиторий
         DeviceState state = stateRepository.getOrCreate(senderId);
         state.name = dd.name;
         state.address = dd.address;
-        if (sid != null) {
-            // Проверяем смену сессии в репозитории тоже
-            if (state.lastSessionId != null && !sid.equals(state.lastSessionId)) {
-                log.w("Repo session changed for " + senderId + ": " + state.lastSessionId + " -> " + sid);
-                state.clearMessages();
-            }
-            state.lastSessionId = sid;
-        }
 
         // Если устройство только что стало online - запускаем sync
         if (justCameOnline && dd.deviceId != null) {
@@ -1316,6 +1393,7 @@ public class FastDiscoveryManager {
 
         notifyDeviceUpdated(dd);
     }
+
 
     private void handleMessageSlotRecord(Map<String, String> record, WifiP2pDevice device, String serviceName) {
         String senderId = record.get("id");
@@ -1330,6 +1408,13 @@ public class FastDiscoveryManager {
         if (targetId != null && !targetId.equals(shortDeviceId)) return;
 
         DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
+
+        // Валидация sessionId
+        if (!validateSessionId(senderId, sid, dd)) {
+            dd.lastSeen = System.currentTimeMillis();
+            return;
+        }
+
         dd.deviceId = senderId;
         dd.hasOurApp = true;
         dd.lastSeen = System.currentTimeMillis();
@@ -1351,45 +1436,6 @@ public class FastDiscoveryManager {
                     return;
                 }
             } catch (NumberFormatException e) {}
-        }
-
-        // Session ID фильтрация
-        if (sid != null) {
-            if (dd.sessionId == null) {
-                dd.sessionId = sid;
-            } else if (!sid.equals(dd.sessionId)) {
-                log.w("Ignoring stale message slot " + msgId +
-                        " from " + senderId + " sid=" + sid +
-                        " != currentSid=" + dd.sessionId);
-                return;
-            }
-        } else {
-            if (dd.sessionId != null) {
-                log.w("Ignoring message slot " + msgId +
-                        " from " + senderId + " without sid; deviceSid=" + dd.sessionId);
-                return;
-            }
-        }
-
-        // ДОБАВЛЕНО: Дополнительная проверка - msgId должен содержать текущий sid отправителя
-        // Формат: senderId_senderSessionId_counter
-        // Это защита от старых сообщений с тем же counter но другой сессией
-        if (sid != null && !msgId.contains("_" + sid + "_")) {
-            // Проверяем старый формат (deviceId_counter)
-            String[] parts = msgId.split("_");
-            if (parts.length == 2) {
-                // Старый формат - проверяем по sid из record
-                // Если sid в record совпадает с dd.sessionId - принимаем
-                // Если нет - это старое сообщение
-                log.d("Old format msgId: " + msgId + " from session " + sid);
-            } else if (parts.length >= 3) {
-                // Новый формат deviceId_sessionId_counter
-                String msgSessionId = parts[1];
-                if (!msgSessionId.equals(sid)) {
-                    log.w("Ignoring message with mismatched session in msgId: " + msgId);
-                    return;
-                }
-            }
         }
 
         // Обновляем список видимых сообщений
@@ -1426,7 +1472,6 @@ public class FastDiscoveryManager {
 
         notifyDeviceUpdated(dd);
     }
-
     private void handleAckServiceRecord(Map<String, String> record, WifiP2pDevice device) {
         String senderId = record.get("id");
         String acks = record.get("ack");
@@ -1435,26 +1480,16 @@ public class FastDiscoveryManager {
         if (senderId == null || shortDeviceId.equals(senderId)) return;
 
         DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
+
+        // Валидация sessionId
+        if (!validateSessionId(senderId, sid, dd)) {
+            dd.lastSeen = System.currentTimeMillis();
+            return;
+        }
+
         dd.deviceId = senderId;
         dd.hasOurApp = true;
         dd.lastSeen = System.currentTimeMillis();
-
-        // Session ID фильтрация
-        if (sid != null) {
-            if (dd.sessionId == null) {
-                dd.sessionId = sid;
-            } else if (!sid.equals(dd.sessionId)) {
-                log.w("Ignoring ACK service from " + senderId +
-                        " sid=" + sid + " != currentSid=" + dd.sessionId);
-                return;
-            }
-        } else {
-            if (dd.sessionId != null) {
-                log.w("Ignoring ACK service from " + senderId +
-                        " without sid; deviceSid=" + dd.sessionId);
-                return;
-            }
-        }
 
         log.success("ACK SERVICE received from " + senderId + ": " + acks);
 
