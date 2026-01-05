@@ -47,6 +47,11 @@ public class FastDiscoveryManager {
      */
     private static final long DNS_CACHE_RESET_INTERVAL = 45_000;
 
+    /**
+     * Интервал перерегистрации сервисов для обновления DNS кэша (мс)
+     */
+    private static final long SERVICE_REREGISTER_INTERVAL = 30_000;
+
     // ==================== STATE ====================
     private final Context context;
     private WifiP2pManager manager;
@@ -1645,6 +1650,95 @@ public class FastDiscoveryManager {
         scheduleNextDiscovery();
     }
 
+
+    /**
+     * Перерегистрация всех активных сервисов для обновления DNS кэша.
+     */
+    private void reregisterAllServices() {
+        log.d("Re-registering all services to refresh DNS cache");
+
+        // Перерегистрируем main service
+        if (mainServiceInfo != null) {
+            reregisterMainService();
+        }
+
+        // Перерегистрируем активные слоты сообщений
+        for (SlotInfo slot : messageSlots.values()) {
+            if (slot.isRegistered && slot.serviceInfo != null) {
+                reregisterSlot(slot);
+            }
+        }
+    }
+
+    /**
+     * Перерегистрация main service
+     */
+    private void reregisterMainService() {
+        final WifiP2pDnsSdServiceInfo oldInfo = mainServiceInfo;
+
+        manager.removeLocalService(channel, oldInfo, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                Map<String, String> record = buildMainServiceRecord();
+                WifiP2pDnsSdServiceInfo newInfo = WifiP2pDnsSdServiceInfo.newInstance(
+                        P2pConfig.MAIN_SERVICE_NAME, P2pConfig.SERVICE_TYPE, record);
+
+                manager.addLocalService(channel, newInfo, new WifiP2pManager.ActionListener() {
+                    @Override
+                    public void onSuccess() {
+                        mainServiceInfo = newInfo;
+                        log.d("Main service re-registered");
+                    }
+                    @Override
+                    public void onFailure(int r) {
+                        mainServiceInfo = newInfo;
+                        log.w("Main service re-register addLocal failed: " + reasonToString(r));
+                    }
+                });
+            }
+            @Override
+            public void onFailure(int r) {
+                log.w("Main service re-register removeLocal failed: " + reasonToString(r));
+                // Пробуем добавить без удаления
+                Map<String, String> record = buildMainServiceRecord();
+                mainServiceInfo = WifiP2pDnsSdServiceInfo.newInstance(
+                        P2pConfig.MAIN_SERVICE_NAME, P2pConfig.SERVICE_TYPE, record);
+                manager.addLocalService(channel, mainServiceInfo, null);
+            }
+        });
+    }
+
+    /**
+     * Перерегистрация слота сообщения
+     */
+    private void reregisterSlot(SlotInfo slot) {
+        if (slot.serviceInfo == null) return;
+
+        final WifiP2pDnsSdServiceInfo serviceInfo = slot.serviceInfo;
+        final int slotIndex = slot.slotIndex;
+
+        manager.removeLocalService(channel, serviceInfo, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                manager.addLocalService(channel, serviceInfo, new WifiP2pManager.ActionListener() {
+                    @Override
+                    public void onSuccess() {
+                        log.d("Slot " + slotIndex + " re-registered");
+                    }
+                    @Override
+                    public void onFailure(int r) {
+                        log.w("Slot " + slotIndex + " re-register addLocal failed");
+                    }
+                });
+            }
+            @Override
+            public void onFailure(int r) {
+                // Пробуем добавить без удаления
+                manager.addLocalService(channel, serviceInfo, null);
+            }
+        });
+    }
+
     // ==================== PERIODIC TASKS ====================
 
     private void schedulePeriodicTasks() {
@@ -1654,6 +1748,7 @@ public class FastDiscoveryManager {
         handler.removeCallbacks(onlineCheckRunnable);
         handler.removeCallbacks(syncCheckRunnable);
         handler.removeCallbacks(dnsCacheResetRunnable);  // ДОБАВИТЬ
+        handler.removeCallbacks(serviceReregisterRunnable);  // ДОБАВИТЬ
 
         handler.postDelayed(heartbeatRunnable, P2pConfig.HEARTBEAT_INTERVAL);
         handler.postDelayed(ackUpdateRunnable, P2pConfig.ACK_UPDATE_INTERVAL);
@@ -1661,6 +1756,7 @@ public class FastDiscoveryManager {
         handler.postDelayed(onlineCheckRunnable, P2pConfig.DEVICE_ONLINE_THRESHOLD / 2);
         handler.postDelayed(syncCheckRunnable, P2pConfig.SYNC_CHECK_INTERVAL);
         handler.postDelayed(dnsCacheResetRunnable, DNS_CACHE_RESET_INTERVAL);  // ДОБАВИТЬ
+        handler.postDelayed(serviceReregisterRunnable, SERVICE_REREGISTER_INTERVAL);  // ДОБАВИТЬ
     }
 
     private final Runnable heartbeatRunnable = new Runnable() {
@@ -1669,6 +1765,17 @@ public class FastDiscoveryManager {
             if (!isRunning) return;
             updateMainService();
             handler.postDelayed(this, P2pConfig.HEARTBEAT_INTERVAL);
+        }
+    };
+
+    private final Runnable serviceReregisterRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isRunning) return;
+
+            reregisterAllServices();
+
+            handler.postDelayed(this, SERVICE_REREGISTER_INTERVAL);
         }
     };
 
