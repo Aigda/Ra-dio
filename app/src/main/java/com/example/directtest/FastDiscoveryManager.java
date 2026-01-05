@@ -42,6 +42,11 @@ public class FastDiscoveryManager {
 
     private static final String TAG = "FastDiscovery";
 
+    /**
+     * Интервал сброса DNS-SD запросов для очистки кэша (мс)
+     */
+    private static final long DNS_CACHE_RESET_INTERVAL = 45_000;
+
     // ==================== STATE ====================
     private final Context context;
     private WifiP2pManager manager;
@@ -341,6 +346,10 @@ public class FastDiscoveryManager {
         logDiagnosticState("STOPPING");
 
         isRunning = false;
+
+        // Явно останавливаем периодические задачи
+        handler.removeCallbacks(dnsCacheResetRunnable);  // ДОБАВИТЬ (опционально)
+
         handler.removeCallbacksAndMessages(null);
 
         // Принудительное сохранение состояния
@@ -1526,6 +1535,37 @@ public class FastDiscoveryManager {
 
     // ==================== SERVICE REQUESTS ====================
 
+    /**
+     * Сброс service requests для очистки системного DNS кэша.
+     * Решает проблему когда Android возвращает устаревшие TXT записи.
+     */
+    private void resetServiceRequests() {
+        log.d("Resetting DNS-SD requests to clear cache");
+
+        manager.clearServiceRequests(channel, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                serviceRequests.clear();
+                addServiceRequests(() -> {
+                    manager.discoverServices(channel, new WifiP2pManager.ActionListener() {
+                        @Override
+                        public void onSuccess() {
+                            log.d("DNS-SD cache reset complete");
+                        }
+                        @Override
+                        public void onFailure(int r) {
+                            log.w("discoverServices after reset failed: " + reasonToString(r));
+                        }
+                    });
+                });
+            }
+            @Override
+            public void onFailure(int r) {
+                log.w("Failed to clear service requests: " + reasonToString(r));
+            }
+        });
+    }
+
     private void addServiceRequests(Runnable onComplete) {
         List<WifiP2pServiceRequest> requests = new ArrayList<>();
         requests.add(WifiP2pDnsSdServiceRequest.newInstance(P2pConfig.SERVICE_TYPE));
@@ -1613,12 +1653,14 @@ public class FastDiscoveryManager {
         handler.removeCallbacks(visibilityCheckRunnable);
         handler.removeCallbacks(onlineCheckRunnable);
         handler.removeCallbacks(syncCheckRunnable);
+        handler.removeCallbacks(dnsCacheResetRunnable);  // ДОБАВИТЬ
 
         handler.postDelayed(heartbeatRunnable, P2pConfig.HEARTBEAT_INTERVAL);
         handler.postDelayed(ackUpdateRunnable, P2pConfig.ACK_UPDATE_INTERVAL);
         handler.postDelayed(visibilityCheckRunnable, 5000);
         handler.postDelayed(onlineCheckRunnable, P2pConfig.DEVICE_ONLINE_THRESHOLD / 2);
         handler.postDelayed(syncCheckRunnable, P2pConfig.SYNC_CHECK_INTERVAL);
+        handler.postDelayed(dnsCacheResetRunnable, DNS_CACHE_RESET_INTERVAL);  // ДОБАВИТЬ
     }
 
     private final Runnable heartbeatRunnable = new Runnable() {
@@ -1665,6 +1707,19 @@ public class FastDiscoveryManager {
             handler.postDelayed(this, P2pConfig.SYNC_CHECK_INTERVAL);
         }
     };
+
+    private final Runnable dnsCacheResetRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!isRunning) return;
+
+            resetServiceRequests();
+
+            handler.postDelayed(this, DNS_CACHE_RESET_INTERVAL);
+        }
+    };
+
+
 
     private void scheduleNextDiscovery() {
         handler.removeCallbacks(discoveryRunnable);
