@@ -11,9 +11,12 @@ import android.os.Looper;
 
 import androidx.annotation.Nullable;
 
+
+import com.example.directtest.model.DiscoveredDevice;
+
 import java.util.List;
 
-public class DiscoveryService extends Service implements FastDiscoveryManager.DiscoveryListener {
+public class DiscoveryService extends Service implements DiscoveryListener {
 
     private static final String TAG = "DiscoveryService";
 
@@ -46,12 +49,12 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     public interface ServiceCallback {
-        void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device);
-        void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device);
-        void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device);
+        void onDeviceFound(DiscoveredDevice device);
+        void onDeviceUpdated(DiscoveredDevice device);
+        void onDeviceLost(DiscoveredDevice device);
         void onMessageSent(String messageId, String message, String targetDeviceId);
-        void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message);
-        void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId);
+        void onMessageReceived(DiscoveredDevice device, String messageId, String message);
+        void onAckReceived(DiscoveredDevice device, String ackedMessageId);
         void onError(String message);
     }
 
@@ -161,7 +164,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
         if (discoveryManager == null) return 0;
 
         int count = 0;
-        for (FastDiscoveryManager.DiscoveredDevice device : discoveryManager.getAllDevices()) {
+        for (DiscoveredDevice device : discoveryManager.getAllDevices()) {
             if (device.isOnline() && device.hasOurApp) {
                 count++;
             }
@@ -195,7 +198,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     /**
      * Получить список устройств
      */
-    public List<FastDiscoveryManager.DiscoveredDevice> getAllDevices() {
+    public List<DiscoveredDevice> getAllDevices() {
         if (discoveryManager != null) {
             return discoveryManager.getAllDevices();
         }
@@ -275,7 +278,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     // ==================== DISCOVERY LISTENER ====================
 
     @Override
-    public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceFound(DiscoveredDevice device) {
         log("Device found: " + device.getShortId());
         updateNotificationStatus();
 
@@ -285,7 +288,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     @Override
-    public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceUpdated(DiscoveredDevice device) {
         updateNotificationStatus();
 
         if (serviceCallback != null) {
@@ -294,7 +297,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     @Override
-    public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceLost(DiscoveredDevice device) {
         log("Device lost: " + device.getShortId());
         updateNotificationStatus();
 
@@ -304,7 +307,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     @Override
-    public void onDeviceOnlineStatusChanged(FastDiscoveryManager.DiscoveredDevice device, boolean isOnline) {
+    public void onDeviceOnlineStatusChanged(DiscoveredDevice device, boolean isOnline) {
         log("Device " + device.getShortId() + " online: " + isOnline);
         updateNotificationStatus();
     }
@@ -333,7 +336,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     @Override
-    public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message) {
+    public void onMessageReceived(DiscoveredDevice device, String messageId, String message) {
         log("Message received: " + messageId + " from " + device.getShortId());
 
         if (serviceCallback != null) {
@@ -342,7 +345,7 @@ public class DiscoveryService extends Service implements FastDiscoveryManager.Di
     }
 
     @Override
-    public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
+    public void onAckReceived(DiscoveredDevice device, String ackedMessageId) {
         log("ACK received: " + ackedMessageId);
 
         if (serviceCallback != null) {

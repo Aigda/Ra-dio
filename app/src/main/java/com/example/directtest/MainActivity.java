@@ -1,5 +1,7 @@
 package com.example.directtest;
 
+import android.widget.EditText;
+import android.view.inputmethod.InputMethodManager;
 import android.Manifest;
 import android.content.ComponentName;
 import android.content.Context;
@@ -26,6 +28,8 @@ import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.directtest.model.DiscoveredDevice;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -41,7 +45,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
     // UI
     private DeviceAdapter adapter;
-    private final List<FastDiscoveryManager.DiscoveredDevice> devices = new ArrayList<>();
+    private final List<DiscoveredDevice> devices = new ArrayList<>();
     private TextView tvStatus;
     private Button btnStop;
 
@@ -345,7 +349,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
     private void refreshDeviceList() {
         if (discoveryService != null) {
-            List<FastDiscoveryManager.DiscoveredDevice> serviceDevices = discoveryService.getAllDevices();
+            List<DiscoveredDevice> serviceDevices = discoveryService.getAllDevices();
             devices.clear();
             devices.addAll(serviceDevices);
             adapter.notifyDataSetChanged();
@@ -360,7 +364,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
         int total = devices.size();
         int online = 0, withApp = 0;
-        for (FastDiscoveryManager.DiscoveredDevice d : devices) {
+        for (DiscoveredDevice d : devices) {
             if (d.isOnline()) online++;
             if (d.hasOurApp) withApp++;
         }
@@ -375,7 +379,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
                 discoveryService.getPendingAcksCount()));
     }
 
-    private void updateDevice(FastDiscoveryManager.DiscoveredDevice device) {
+    private void updateDevice(DiscoveredDevice device) {
         int idx = -1;
         for (int i = 0; i < devices.size(); i++) {
             if (devices.get(i).address.equals(device.address)) {
@@ -393,7 +397,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
     // ==================== DEVICE CLICK ====================
 
-    private void onDeviceClick(FastDiscoveryManager.DiscoveredDevice device) {
+    private void onDeviceClick(DiscoveredDevice device) {
         if (!serviceBound || discoveryService == null) {
             Toast.makeText(this, "Сервис не запущен", Toast.LENGTH_SHORT).show();
             return;
@@ -409,27 +413,74 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
             return;
         }
 
-        // Генерируем уникальное сообщение
-        String text = "Hello @" + System.currentTimeMillis() % 10000;
-        String msgId = discoveryService.sendMessage(text, device.deviceId);
+        // ДОБАВЛЕНО: Проверка лимита на стороне UI
+        int pendingCount = device.getPendingSentMessagesCount();
+        if (pendingCount >= 3) {
+            Toast.makeText(this, "Лимит: 3 неподтверждённых сообщения.\nДождитесь подтверждения.", Toast.LENGTH_LONG).show();
+            return;
+        }
 
-        Toast.makeText(this, "→ " + device.getShortId() + "\n" + msgId, Toast.LENGTH_SHORT).show();
+        // ИЗМЕНЕНО: Диалог ввода сообщения вместо автогенерации
+        showMessageInputDialog(device);
+    }
+
+    /**
+     * Показать диалог для ввода сообщения
+     */
+    private void showMessageInputDialog(DiscoveredDevice device) {
+        EditText input = new EditText(this);
+        input.setHint("Введите сообщение");
+        input.setSingleLine(false);
+        input.setMaxLines(3);
+
+        // Добавляем отступы
+        int padding = (int) (16 * getResources().getDisplayMetrics().density);
+        input.setPadding(padding, padding, padding, padding);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Сообщение для " + device.getShortId())
+                .setMessage("Устройство: " + (device.name != null ? device.name : "Unknown"))
+                .setView(input)
+                .setPositiveButton("Отправить", (dialog, which) -> {
+                    String text = input.getText().toString().trim();
+                    if (text.isEmpty()) {
+                        Toast.makeText(this, "Сообщение не может быть пустым", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+
+                    String msgId = discoveryService.sendMessage(text, device.deviceId);
+                    if (msgId != null) {
+                        Toast.makeText(this, "→ " + device.getShortId() + "\n" + msgId, Toast.LENGTH_SHORT).show();
+                    }
+                    // Ошибка показывается через onError callback
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+
+        // Автоматически показать клавиатуру
+        input.requestFocus();
+        input.postDelayed(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            }
+        }, 200);
     }
 
     // ==================== SERVICE CALLBACK ====================
 
     @Override
-    public void onDeviceFound(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceFound(DiscoveredDevice device) {
         updateDevice(device);
     }
 
     @Override
-    public void onDeviceUpdated(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceUpdated(DiscoveredDevice device) {
         updateDevice(device);
     }
 
     @Override
-    public void onDeviceLost(FastDiscoveryManager.DiscoveredDevice device) {
+    public void onDeviceLost(DiscoveredDevice device) {
         devices.remove(device);
         adapter.notifyDataSetChanged();
     }
@@ -441,13 +492,13 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
     }
 
     @Override
-    public void onMessageReceived(FastDiscoveryManager.DiscoveredDevice device, String messageId, String message) {
+    public void onMessageReceived(DiscoveredDevice device, String messageId, String message) {
         Toast.makeText(this, "← " + device.getShortId() + ": " + message, Toast.LENGTH_LONG).show();
         adapter.notifyDataSetChanged();
     }
 
     @Override
-    public void onAckReceived(FastDiscoveryManager.DiscoveredDevice device, String ackedMessageId) {
+    public void onAckReceived(DiscoveredDevice device, String ackedMessageId) {
         Toast.makeText(this, "✓ " + ackedMessageId, Toast.LENGTH_SHORT).show();
         adapter.notifyDataSetChanged();
     }
@@ -461,14 +512,14 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
     static class DeviceAdapter extends RecyclerView.Adapter<DeviceAdapter.VH> {
 
-        private final List<FastDiscoveryManager.DiscoveredDevice> list;
+        private final List<DiscoveredDevice> list;
         private final OnClick listener;
 
         interface OnClick {
-            void onClick(FastDiscoveryManager.DiscoveredDevice d);
+            void onClick(DiscoveredDevice d);
         }
 
-        DeviceAdapter(List<FastDiscoveryManager.DiscoveredDevice> list, OnClick l) {
+        DeviceAdapter(List<DiscoveredDevice> list, OnClick l) {
             this.list = list;
             this.listener = l;
         }
@@ -482,7 +533,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
 
         @Override
         public void onBindViewHolder(@NonNull VH h, int position) {
-            FastDiscoveryManager.DiscoveredDevice d = list.get(position);
+            DiscoveredDevice d = list.get(position);
             long now = System.currentTimeMillis();
 
             // Header
@@ -518,13 +569,13 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
             }
 
             // RECEIVED messages + ACK
-            List<FastDiscoveryManager.DiscoveredDevice.ReceivedMessage> recv = d.getLastReceivedMessages(3);
+            List<DiscoveredDevice.ReceivedMessage> recv = d.getLastReceivedMessages(3);
             bindReceivedMessage(h.tvRecv1, h.tvRecv1Ack, recv.size() > 0 ? recv.get(0) : null, now);
             bindReceivedMessage(h.tvRecv2, h.tvRecv2Ack, recv.size() > 1 ? recv.get(1) : null, now);
             bindReceivedMessage(h.tvRecv3, h.tvRecv3Ack, recv.size() > 2 ? recv.get(2) : null, now);
 
             // SENT messages + ACK
-            List<FastDiscoveryManager.DiscoveredDevice.SentMessage> sent = d.getLastSentMessages(3);
+            List<DiscoveredDevice.SentMessage> sent = d.getLastSentMessages(3);
             bindSentMessage(h.tvSent1, h.tvSent1Ack, sent.size() > 0 ? sent.get(0) : null, now);
             bindSentMessage(h.tvSent2, h.tvSent2Ack, sent.size() > 1 ? sent.get(1) : null, now);
             bindSentMessage(h.tvSent3, h.tvSent3Ack, sent.size() > 2 ? sent.get(2) : null, now);
@@ -541,7 +592,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
         }
 
         private void bindReceivedMessage(TextView tvMsg, TextView tvAck,
-                                         FastDiscoveryManager.DiscoveredDevice.ReceivedMessage m, long now) {
+                                         DiscoveredDevice.ReceivedMessage m, long now) {
             if (m == null) {
                 tvMsg.setVisibility(View.GONE);
                 tvAck.setVisibility(View.GONE);
@@ -567,7 +618,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
         }
 
         private void bindSentMessage(TextView tvMsg, TextView tvAck,
-                                     FastDiscoveryManager.DiscoveredDevice.SentMessage m, long now) {
+                                     DiscoveredDevice.SentMessage m, long now) {
             if (m == null) {
                 tvMsg.setVisibility(View.GONE);
                 tvAck.setVisibility(View.GONE);
