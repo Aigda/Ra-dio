@@ -63,21 +63,14 @@ public class DiscoveryService extends Service implements DiscoveryListener {
     @Override
     public void onCreate() {
         super.onCreate();
-        log("onCreate");
+        log("onCreate - initializing service");
 
-        // Создаём NotificationHelper
         notificationHelper = new NotificationHelper(this);
-
-        // Создаём FastDiscoveryManager
         discoveryManager = new FastDiscoveryManager(this);
 
-        // Запускаем как Foreground Service
         startForegroundService();
-
-        // Запускаем discovery
         discoveryManager.start(this);
 
-        // Периодическое обновление статуса
         handler.postDelayed(statusUpdateRunnable, 1000);
 
         log("Service created and discovery started");
@@ -85,41 +78,37 @@ public class DiscoveryService extends Service implements DiscoveryListener {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        log("onStartCommand");
+        String action = intent != null ? intent.getAction() : "null";
+        log("onStartCommand - action=" + action + " flags=" + flags);
 
-        // Обработка команды остановки
         if (intent != null && NotificationHelper.ACTION_STOP_SERVICE.equals(intent.getAction())) {
             log("Stop command received");
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        // Возвращаем START_STICKY - система перезапустит сервис если он убит
         return START_STICKY;
     }
 
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
-        log("onBind");
+        log("onBind - client connecting");
         return binder;
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
-        log("onUnbind");
-        // Сервис продолжает работать даже после отключения Activity
+        log("onUnbind - client disconnected, service continues");
         return super.onUnbind(intent);
     }
 
     @Override
     public void onDestroy() {
-        log("onDestroy");
+        log("onDestroy - stopping service");
 
-        // Останавливаем обновления
         handler.removeCallbacksAndMessages(null);
 
-        // Останавливаем discovery
         if (discoveryManager != null) {
             discoveryManager.stop();
             discoveryManager = null;
@@ -128,6 +117,20 @@ public class DiscoveryService extends Service implements DiscoveryListener {
         super.onDestroy();
         log("Service destroyed");
     }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        log("onTaskRemoved - app swiped from recents");
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        log("onTrimMemory - level=" + level);
+    }
+
+
 
     // ==================== FOREGROUND SERVICE ====================
 

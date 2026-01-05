@@ -21,6 +21,9 @@
     <!-- ==================== OTHER ==================== -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Для WiFi Lock - предотвращение засыпания WiFi -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

@@ -76,25 +76,31 @@ public final class P2pConfig {
 
     // ==================== TIMING: BURST DISCOVERY ====================
 
+    // ==================== TIMING: BURST DISCOVERY ====================
+
     /**
      * Интервал между шагами начального burst (мс)
+     * ИЗМЕНЕНО: было 300, стало 200 для более быстрого обнаружения
      */
-    public static final long INITIAL_BURST_INTERVAL = 300;
+    public static final long INITIAL_BURST_INTERVAL = 200;
 
     /**
      * Количество шагов начального burst
+     * ИЗМЕНЕНО: было 5, стало 8 для более надёжного обнаружения
      */
-    public static final int INITIAL_BURST_COUNT = 5;
+    public static final int INITIAL_BURST_COUNT = 8;
 
     /**
      * Интервал между шагами основного burst (мс)
+     * ИЗМЕНЕНО: было 600, стало 400
      */
-    public static final long BURST_INTERVAL = 600;
+    public static final long BURST_INTERVAL = 400;
 
     /**
      * Количество шагов основного burst
      */
     public static final int BURST_COUNT = 8;
+
 
     // ==================== TIMING: DISCOVERY ====================
 

@@ -67,6 +67,8 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
+            log("onServiceConnected");
+
             DiscoveryService.LocalBinder localBinder = (DiscoveryService.LocalBinder) binder;
             discoveryService = localBinder.getService();
             serviceBound = true;
@@ -81,11 +83,16 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
             updateStatusBar();
             updateStopButton();
 
+            // Принудительный refresh - будит discovery после сна
+            log("Triggering forceRefresh after bind");
+            discoveryService.forceRefresh();
+
             Toast.makeText(MainActivity.this, "Service connected", Toast.LENGTH_SHORT).show();
         }
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
+            log("onServiceDisconnected");
             discoveryService = null;
             serviceBound = false;
             updateStopButton();
@@ -97,6 +104,7 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        log("onCreate");
         setContentView(R.layout.activity_main);
 
         initViews();
@@ -106,16 +114,16 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
     @Override
     protected void onStart() {
         super.onStart();
-        // Привязываемся к сервису если он запущен
+        log("onStart - binding to service");
         bindToServiceIfRunning();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        log("onResume - serviceBound=" + serviceBound);
         uiHandler.post(uiUpdateRunnable);
 
-        // Обновляем список устройств
         if (serviceBound) {
             refreshDeviceList();
         }
@@ -124,20 +132,29 @@ public class MainActivity extends AppCompatActivity implements DiscoveryService.
     @Override
     protected void onPause() {
         super.onPause();
+        log("onPause");
         uiHandler.removeCallbacks(uiUpdateRunnable);
     }
 
     @Override
     protected void onStop() {
         super.onStop();
-        // Отвязываемся от сервиса (но сервис продолжает работать!)
+        log("onStop - unbinding, devices=" + devices.size());
         unbindFromService();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        log("onDestroy");
         uiHandler.removeCallbacksAndMessages(null);
+    }
+
+    /**
+     * Логирование с тегом Activity
+     */
+    private void log(String message) {
+        DiagnosticLogger.getInstance().i("[MainActivity] " + message);
     }
 
     // ==================== INIT ====================

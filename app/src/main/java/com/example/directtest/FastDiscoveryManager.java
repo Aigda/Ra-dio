@@ -36,6 +36,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import android.net.wifi.WifiManager;
 
 public class FastDiscoveryManager {
 
@@ -46,6 +47,14 @@ public class FastDiscoveryManager {
     private WifiP2pManager manager;
     private WifiP2pManager.Channel channel;
     private BroadcastReceiver receiver;
+
+    // WiFi Lock для предотвращения засыпания WiFi
+    private WifiManager.WifiLock wifiLock;
+
+    // Диагностика lifecycle
+    private long lastDiscoveryTime = 0;
+    private long lastPeersFoundTime = 0;
+    private int discoveryRestartCount = 0;
 
     private final String deviceId;
     private final String shortDeviceId;
@@ -302,15 +311,20 @@ public class FastDiscoveryManager {
 
         channel = manager.initialize(context, Looper.getMainLooper(), () -> {
             log.w("Channel disconnected!");
+            logDiagnosticState("CHANNEL_DISCONNECTED");
             if (isRunning) {
-                handler.postDelayed(this::reconnect, 2000);
+                handler.postDelayed(this::softReconnect, 2000);
             }
         });
         log.success("Channel initialized");
 
+        // Получаем WiFi Lock для предотвращения засыпания
+        acquireWifiLock();
+
         isRunning = true;
         burstCount = 0;
         initialBurstPhase = true;
+        discoveryRestartCount = 0;
         txtRecordsReceived.set(0);
         serviceResponsesReceived.set(0);
 
@@ -318,11 +332,14 @@ public class FastDiscoveryManager {
         registerReceiver();
         initializeAndStart();
 
+        log.i("Service started, WiFi Lock: " + (wifiLock != null && wifiLock.isHeld()));
         notifyStatus("Starting...");
     }
 
     public void stop() {
         log.divider("STOP");
+        logDiagnosticState("STOPPING");
+
         isRunning = false;
         handler.removeCallbacksAndMessages(null);
 
@@ -344,6 +361,9 @@ public class FastDiscoveryManager {
             manager.removeGroup(channel, null);
         }
 
+        // Освобождаем WiFi Lock
+        releaseWifiLock();
+
         messageSlots.clear();
         pendingMessages.clear();
         serviceRequests.clear();
@@ -354,7 +374,44 @@ public class FastDiscoveryManager {
         recentTxtRecords.clear();
         processedAcks.clear();
 
+        log.i("Stop complete. Discovery restarts: " + discoveryRestartCount);
         notifyStatus("Stopped");
+    }
+
+    /**
+     * Получить WiFi Lock для предотвращения засыпания WiFi
+     */
+    private void acquireWifiLock() {
+        try {
+            WifiManager wifiManager = (WifiManager) context.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager != null) {
+                wifiLock = wifiManager.createWifiLock(
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                        "DirectTest:DiscoveryLock"
+                );
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+                log.success("WiFi Lock acquired");
+            }
+        } catch (Exception e) {
+            log.w("Failed to acquire WiFi Lock: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Освободить WiFi Lock
+     */
+    private void releaseWifiLock() {
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                log.i("WiFi Lock released");
+            }
+        } catch (Exception e) {
+            log.w("Failed to release WiFi Lock: " + e.getMessage());
+        }
+        wifiLock = null;
     }
 
     public void clearAll() {
@@ -577,10 +634,40 @@ public class FastDiscoveryManager {
 
     // ==================== INITIALIZATION ====================
 
-    private void reconnect() {
-        log.w("Reconnecting...");
-        stop();
-        start(listener);
+//    private void reconnect() {
+//        log.w("Reconnecting...");
+//        stop();
+//        start(listener);
+//    }
+
+    /**
+     * Мягкое переподключение без потери кэша устройств
+     */
+    private void softReconnect() {
+        log.divider("SOFT RECONNECT");
+        discoveryRestartCount++;
+        logDiagnosticState("RECONNECTING");
+
+        // Сохраняем текущие данные
+        Map<String, DiscoveredDevice> savedCache = new HashMap<>(deviceCache);
+        int savedCacheSize = savedCache.size();
+
+        // Переинициализируем канал
+        channel = manager.initialize(context, Looper.getMainLooper(), () -> {
+            log.w("Channel disconnected again!");
+            if (isRunning) {
+                handler.postDelayed(this::softReconnect, 2000);
+            }
+        });
+
+        // Восстанавливаем кэш
+        deviceCache.clear();
+        deviceCache.putAll(savedCache);
+
+        log.i("Soft reconnect: restored " + deviceCache.size() + "/" + savedCacheSize + " devices");
+
+        // Перезапускаем discovery
+        initializeAndStart();
     }
 
     private void initializeAndStart() {
@@ -1593,22 +1680,66 @@ public class FastDiscoveryManager {
     };
 
     private void performDiscovery() {
+        lastDiscoveryTime = System.currentTimeMillis();
         discoveryInProgress = true;
-        manager.discoverPeers(channel, null);
+
+        manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                log.d("discoverPeers started");
+            }
+            @Override
+            public void onFailure(int reason) {
+                log.w("discoverPeers failed: " + reasonToString(reason));
+            }
+        });
+
         handler.postDelayed(() -> {
             manager.discoverServices(channel, new WifiP2pManager.ActionListener() {
-                @Override public void onSuccess() {
+                @Override
+                public void onSuccess() {
+                    log.d("discoverServices started");
                     discoveryInProgress = false;
                     scheduleNextDiscovery();
                 }
-                @Override public void onFailure(int reason) {
+                @Override
+                public void onFailure(int reason) {
+                    log.w("discoverServices failed: " + reasonToString(reason));
                     discoveryInProgress = false;
+
+                    // При BUSY пробуем снова через короткий интервал
+                    if (reason == WifiP2pManager.BUSY) {
+                        handler.postDelayed(() -> manager.discoverServices(channel, null), 500);
+                    }
                     scheduleNextDiscovery();
                 }
             });
         }, 100);
     }
 
+    /**
+     * Получить расширенную диагностику (для UI)
+     */
+    public String getExtendedDiagnosticInfo() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(getDiagnosticInfo());
+
+        sb.append("\n\n═══ RUNTIME STATE ═══\n");
+        sb.append("Running: ").append(isRunning).append("\n");
+        sb.append("Discovery active: ").append(discoveryInProgress).append("\n");
+        sb.append("Restart count: ").append(discoveryRestartCount).append("\n");
+        sb.append("WiFi Lock: ").append(wifiLock != null && wifiLock.isHeld()).append("\n");
+
+        long now = System.currentTimeMillis();
+        if (lastDiscoveryTime > 0) {
+            sb.append("Last discovery: ").append((now - lastDiscoveryTime) / 1000).append("s ago\n");
+        }
+        if (lastPeersFoundTime > 0) {
+            sb.append("Last peers: ").append((now - lastPeersFoundTime) / 1000).append("s ago\n");
+        }
+
+        return sb.toString();
+    }
     // ==================== DEVICE MANAGEMENT ====================
 
     private DiscoveredDevice getOrCreateDevice(String address, WifiP2pDevice device) {
@@ -1654,15 +1785,51 @@ public class FastDiscoveryManager {
         }
     }
 
+//    private void cleanupExpiredDevices() {
+//        long now = System.currentTimeMillis();
+//        Iterator<Map.Entry<String, DiscoveredDevice>> it = deviceCache.entrySet().iterator();
+//        while (it.hasNext()) {
+//            Map.Entry<String, DiscoveredDevice> entry = it.next();
+//            if (now - entry.getValue().lastSeen > P2pConfig.CACHE_TTL) {
+//                notifyDeviceLost(entry.getValue());
+//                it.remove();
+//            }
+//        }
+//    }
+
     private void cleanupExpiredDevices() {
         long now = System.currentTimeMillis();
+        int removedCount = 0;
+        int keptCount = 0;
+
         Iterator<Map.Entry<String, DiscoveredDevice>> it = deviceCache.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<String, DiscoveredDevice> entry = it.next();
-            if (now - entry.getValue().lastSeen > P2pConfig.CACHE_TTL) {
-                notifyDeviceLost(entry.getValue());
+            DiscoveredDevice dd = entry.getValue();
+            long age = now - dd.lastSeen;
+
+            if (age > P2pConfig.CACHE_TTL) {
+                // Проверяем, есть ли устройство в репозитории (история общения)
+                if (dd.deviceId != null && stateRepository.get(dd.deviceId) != null) {
+                    // Не удаляем - есть история, просто помечаем как offline
+                    keptCount++;
+                    log.d("Keeping saved device (offline): " + dd.getShortId() +
+                            " age=" + (age / 1000) + "s");
+                    continue;
+                }
+
+                // Удаляем устройство без истории
+                log.d("Removing expired device: " + dd.getShortId() +
+                        " age=" + (age / 1000) + "s");
+                notifyDeviceLost(dd);
                 it.remove();
+                removedCount++;
             }
+        }
+
+        if (removedCount > 0 || keptCount > 0) {
+            log.i("Cleanup: removed=" + removedCount + ", kept=" + keptCount +
+                    ", total=" + deviceCache.size());
         }
     }
 
@@ -1697,33 +1864,72 @@ public class FastDiscoveryManager {
         switch (action) {
             case WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION:
                 int state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1);
-                if (state != WifiP2pManager.WIFI_P2P_STATE_ENABLED) {
+                boolean enabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED;
+                log.i("WiFi P2P state: " + (enabled ? "ENABLED" : "DISABLED"));
+
+                if (!enabled) {
                     notifyError("WiFi P2P is disabled");
+                    logDiagnosticState("WIFI_P2P_DISABLED");
                 }
                 break;
 
             case WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION:
+                lastPeersFoundTime = System.currentTimeMillis();
                 manager.requestPeers(channel, peers -> {
+                    int peerCount = peers.getDeviceList().size();
+                    log.d("Peers changed: " + peerCount + " devices");
+
                     for (WifiP2pDevice device : peers.getDeviceList()) {
-                        getOrCreateDevice(device.deviceAddress, device);
+                        DiscoveredDevice dd = getOrCreateDevice(device.deviceAddress, device);
+
+                        // Быстрое определение по имени устройства
+                        if (device.deviceName != null &&
+                                device.deviceName.contains(P2pConfig.APP_MARKER)) {
+
+                            if (!dd.hasOurApp) {
+                                log.success("App detected by name: " + device.deviceName);
+                            }
+                            dd.hasOurApp = true;
+
+                            String extractedId = extractDeviceIdFromName(device.deviceName);
+                            if (extractedId != null && dd.deviceId == null) {
+                                dd.deviceId = extractedId;
+                                log.d("Extracted device ID: " + extractedId);
+                            }
+
+                            notifyDeviceUpdated(dd);
+                        }
                     }
-                    if (!peers.getDeviceList().isEmpty()) {
-                        handler.postDelayed(() -> manager.discoverServices(channel, null), 200);
+
+                    // Немедленный запрос сервисов после обнаружения peers
+                    if (peerCount > 0) {
+                        handler.postDelayed(() -> {
+                            log.d("Triggering service discovery after peers found");
+                            manager.discoverServices(channel, null);
+                        }, 100);
                     }
                 });
                 break;
 
             case WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION:
                 WifiP2pGroup group = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_GROUP);
-                if (group != null && group.isGroupOwner()) {
-                    manager.removeGroup(channel, null);
+                if (group != null) {
+                    log.d("Connection changed: isGO=" + group.isGroupOwner() +
+                            " clients=" + group.getClientList().size());
+                    if (group.isGroupOwner()) {
+                        manager.removeGroup(channel, null);
+                    }
                 }
                 break;
 
             case WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION:
                 int dState = intent.getIntExtra(WifiP2pManager.EXTRA_DISCOVERY_STATE, -1);
-                if (dState == WifiP2pManager.WIFI_P2P_DISCOVERY_STOPPED) {
+                boolean discovering = dState == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED;
+                log.d("Discovery state: " + (discovering ? "STARTED" : "STOPPED"));
+
+                if (!discovering) {
                     discoveryInProgress = false;
+                    logDiagnosticState("DISCOVERY_STOPPED");
                 }
                 break;
 
@@ -1731,9 +1937,93 @@ public class FastDiscoveryManager {
                 WifiP2pDevice thisDevice = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE);
                 if (thisDevice != null) {
                     macAddress = thisDevice.deviceAddress;
+                    log.d("This device: " + thisDevice.deviceName + " [" + macAddress + "]");
                 }
                 break;
         }
+    }
+
+    /**
+     * Извлечь deviceId из имени устройства с маркером
+     * "[WFD]a1b2c3d4 Model Name" -> "a1b2c3d4"
+     */
+    private String extractDeviceIdFromName(String name) {
+        if (name == null || !name.contains(P2pConfig.APP_MARKER)) {
+            return null;
+        }
+
+        try {
+            int markerEnd = name.indexOf(P2pConfig.APP_MARKER) + P2pConfig.APP_MARKER.length();
+            String rest = name.substring(markerEnd).trim();
+
+            int space = rest.indexOf(' ');
+            String id = space > 0 ? rest.substring(0, space) : rest;
+
+            // Проверяем что это похоже на ID (минимум 8 символов, hex)
+            if (id.length() >= 8 && id.matches("[a-fA-F0-9]+")) {
+                return id;
+            }
+        } catch (Exception e) {
+            log.w("Failed to extract device ID from: " + name);
+        }
+
+        return null;
+    }
+
+    /**
+     * Логирование диагностического состояния системы
+     */
+    private void logDiagnosticState(String trigger) {
+        long now = System.currentTimeMillis();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n╔══════════════════════════════════════════╗\n");
+        sb.append("║ DIAGNOSTIC STATE: ").append(trigger).append("\n");
+        sb.append("╠══════════════════════════════════════════╣\n");
+
+        // Основное состояние
+        sb.append("║ Running: ").append(isRunning).append("\n");
+        sb.append("║ Discovery in progress: ").append(discoveryInProgress).append("\n");
+        sb.append("║ Discovery restarts: ").append(discoveryRestartCount).append("\n");
+
+        // WiFi Lock
+        sb.append("║ WiFi Lock held: ").append(wifiLock != null && wifiLock.isHeld()).append("\n");
+
+        // Таймеры
+        if (lastDiscoveryTime > 0) {
+            sb.append("║ Last discovery: ").append((now - lastDiscoveryTime) / 1000).append("s ago\n");
+        }
+        if (lastPeersFoundTime > 0) {
+            sb.append("║ Last peers found: ").append((now - lastPeersFoundTime) / 1000).append("s ago\n");
+        }
+        if (lastHeartbeatSentTime > 0) {
+            sb.append("║ Last heartbeat: ").append((now - lastHeartbeatSentTime) / 1000).append("s ago\n");
+        }
+
+        // Устройства
+        int total = deviceCache.size();
+        int online = 0;
+        int withApp = 0;
+        for (DiscoveredDevice dd : deviceCache.values()) {
+            if (dd.isOnline()) online++;
+            if (dd.hasOurApp) withApp++;
+        }
+        sb.append("║ Devices: total=").append(total)
+                .append(" online=").append(online)
+                .append(" withApp=").append(withApp).append("\n");
+
+        // Сообщения
+        sb.append("║ Pending messages: ").append(pendingMessages.size()).append("\n");
+        sb.append("║ Pending ACKs: ").append(pendingAcksToSend.size()).append("\n");
+        sb.append("║ TXT received: ").append(txtRecordsReceived.get()).append("\n");
+
+        // Слоты
+        sb.append("║ Active slots: ").append(messageSlots.size()).append("/")
+                .append(P2pConfig.MAX_MSG_SLOTS).append("\n");
+
+        sb.append("╚══════════════════════════════════════════╝");
+
+        log.i(sb.toString());
     }
 
     // ==================== HELPERS ====================
